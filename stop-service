@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONTAINER="${PRIVACY_FILTER_CONTAINER:-privacy-filter-local}"
+podman rm -f "$CONTAINER" 2>/dev/null || true

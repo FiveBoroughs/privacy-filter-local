@@ -1,0 +1,19 @@
+# Reviewed false positives, confirmed 2026-09-16. Every entry below is a
+# synthetic fixture or a documentation example: reserved example-domain
+# addresses (RFC 2606) and invented or historical placeholder names. The
+# names themselves are deliberately not repeated here -- writing them in this
+# file would only create new findings.
+#
+# Entries are keyed on a digest of the matched text, so an entry stops
+# applying the moment that text changes. Never add one you have not read.
+README.md	private_email	8c87b489ce35cf2e
+README.md	private_person	01332c876518a793
+tests/test_adaptive_scan.py	private_email	b5fc85e55755f9e0
+tests/test_adaptive_scan.py	private_email	b8ca88b1306293ca
+tests/test_adaptive_scan.py	private_person	7674021617159190
+tests/test_adaptive_scan.py	private_person	99a563ab2f6e21e9
+tests/test_adaptive_scan.py	private_person	f2465f78e06e9352
+tests/test_pre_commit_scan_policy.py	private_person	bf0ec3694e122e06
+tests/test_service_errors.py	private_email	b5fc85e55755f9e0
+tests/test_text_chunking.py	private_email	ff8d9819fc0e12bf
+tests/test_text_chunking.py	private_person	f95971c7d46f0a1d

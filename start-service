@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Low-level primitive: build the image and (re)place the container, unconditionally.
+# Prefer `privacy-filter-service ensure`, which checks health first and holds a
+# lock -- this script's `podman run --replace` will kill a scan that is in flight.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+IMAGE="${PRIVACY_FILTER_IMAGE:-localhost/privacy-filter-local:gpu}"
+CONTAINER="${PRIVACY_FILTER_CONTAINER:-privacy-filter-local}"
+PORT="${PRIVACY_FILTER_PORT:-8757}"
+# The model needs ~2.8GB bf16 weights plus the CUDA context and transient
+# per-request memory. Refuse to start below this so a VRAM-starved GPU (e.g. a
+# running game) fails fast here instead of OOM-ing on the first commit. Tunable.
+MIN_FREE_VRAM_MIB="${PRIVACY_FILTER_MIN_FREE_VRAM_MIB:-3000}"
+
+# Preflight VRAM check. Skipped when our container is already running (its own
+# weights would otherwise count as "used" and falsely trip the gate on restart).
+if command -v nvidia-smi >/dev/null 2>&1 \
+   && ! podman ps --filter "name=^${CONTAINER}$" --format '{{.Names}}' | grep -q .; then
+  free_mib=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1 | tr -dc '0-9')
+  if [ -n "$free_mib" ] && [ "$free_mib" -lt "$MIN_FREE_VRAM_MIB" ]; then
+    echo "ERROR: only ${free_mib} MiB GPU memory free, need >= ${MIN_FREE_VRAM_MIB} MiB to start the Privacy Filter." >&2
+    echo "Close VRAM-heavy apps (e.g. a game), or override with PRIVACY_FILTER_MIN_FREE_VRAM_MIB=<mib>." >&2
+    exit 1
+  fi
+  echo "GPU memory free: ${free_mib} MiB (need >= ${MIN_FREE_VRAM_MIB})"
+fi
+
+mkdir -p "$ROOT/cache"
+
+# Forward the inference-budget knobs into the container, but only the ones that
+# are actually set: an empty --env would override the service's own defaults with
+# an empty string, which parses as an error rather than as "use the default".
+env_args=()
+for name in PRIVACY_FILTER_MAX_TOKENS PRIVACY_FILTER_MIN_TOKENS \
+            PRIVACY_FILTER_TOKEN_SHRINK_FACTOR PRIVACY_FILTER_CHUNK_OVERLAP_TOKENS \
+            PRIVACY_FILTER_MODEL; do
+  if [ -n "${!name:-}" ]; then
+    env_args+=(--env "${name}=${!name}")
+    echo "Passing ${name}=${!name} to the service"
+  fi
+done
+
+# -q: the build is a cache hit on all but the first run, and the hook runs this
+# on every commit. Failures still print to stderr.
+podman build -q -t "$IMAGE" -f "$ROOT/Containerfile" "$ROOT" >/dev/null
+podman run \
+  --detach \
+  --replace \
+  --name "$CONTAINER" \
+  --security-opt=label=disable \
+  --device nvidia.com/gpu=all \
+  --publish "127.0.0.1:${PORT}:8757" \
+  --volume "$ROOT/cache:/cache:rw" \
+  "${env_args[@]}" \
+  "$IMAGE"
+
+echo "Privacy Filter service starting on http://127.0.0.1:${PORT}"
+echo "Check readiness with: $ROOT/privacy-filter health"

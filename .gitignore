@@ -1,0 +1,13 @@
+# Model weights and build caches: multi-gigabyte, machine-specific, re-fetched
+# on first run.
+cache/
+.hf-cache/
+.uv-cache/
+.venv/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Claude Code's per-machine tool permissions; deliberately local-only.
+.claude/settings.local.json

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Install the Claude Code skill, rewriting the placeholder paths in skill/SKILL.md
+# to wherever this repository actually lives.
+#
+# The skill file has to carry absolute paths: its `allowed-tools` entries are
+# matched against the literal command line, so a relative path would never match.
+# Keeping a placeholder in the repository and substituting it here is what lets
+# the file be published without baking in one machine's home directory.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLACEHOLDER="/path/to/privacy-filter-local"
+DEST_DIR="${1:-$HOME/.claude/skills/privacy-filter}"
+
+if [ ! -f "$ROOT/skill/SKILL.md" ]; then
+  echo "ERROR: $ROOT/skill/SKILL.md not found" >&2
+  exit 1
+fi
+
+mkdir -p "$DEST_DIR"
+sed "s|$PLACEHOLDER|$ROOT|g" "$ROOT/skill/SKILL.md" > "$DEST_DIR/SKILL.md"
+
+if grep -q "$PLACEHOLDER" "$DEST_DIR/SKILL.md"; then
+  echo "ERROR: placeholder survived substitution in $DEST_DIR/SKILL.md" >&2
+  exit 1
+fi
+
+echo "Installed skill to $DEST_DIR/SKILL.md"
+echo "Commands point at $ROOT"

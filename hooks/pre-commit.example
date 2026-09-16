@@ -1,0 +1,19 @@
+#!/bin/sh
+# Example git pre-commit hook: scan staged additions for PII before they land.
+#
+# Install for a single repository:
+#   cp hooks/pre-commit.example .git/hooks/pre-commit
+#   chmod +x .git/hooks/pre-commit
+#
+# Install for every repository on the machine:
+#   mkdir -p ~/.config/git/hooks
+#   cp hooks/pre-commit.example ~/.config/git/hooks/pre-commit
+#   chmod +x ~/.config/git/hooks/pre-commit
+#   git config --global core.hooksPath ~/.config/git/hooks
+#
+# Note that core.hooksPath REPLACES per-repository hooks rather than adding to
+# them: with it set, git ignores .git/hooks everywhere. If you rely on hooks that
+# projects ship themselves, invoke them from this file before the line below.
+#
+# Point this at wherever you cloned the repository.
+exec "$HOME/Code/privacy-filter-local/git-pre-commit-pii"
