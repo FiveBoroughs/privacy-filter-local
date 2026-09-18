@@ -162,6 +162,22 @@ class ContainerFailureTest(unittest.TestCase):
             "lower PRIVACY_FILTER_MAX_TOKENS to 128000 or below.",
         )
 
+    def test_an_onnx_runtime_allocator_failure_is_reported_not_timed_out(self):
+        # ONNX Runtime's exception class is named `Fail`, so a class-name filter
+        # that insisted on Error/Exception turned a 22-second startup failure
+        # into a 180-second "did not become ready".
+        logs = (
+            "  File \"/app/onnx_backend.py\", line 96, in __init__\n"
+            "onnxruntime.capi.onnxruntime_pybind11_state.Fail: [ONNXRuntimeError] "
+            ": 1 : FAIL : Exception during initialization: bfc_arena.cc:360\n"
+            "ERROR:    Application startup failed. Exiting.\n"
+        )
+        self.assertEqual(
+            self.run_with_logs(logs),
+            "[ONNXRuntimeError] : 1 : FAIL : Exception during initialization: "
+            "bfc_arena.cc:360",
+        )
+
     def test_a_container_that_logged_no_exception_reports_nothing(self):
         self.assertIsNone(self.run_with_logs("INFO:     Started server process\n"))
 

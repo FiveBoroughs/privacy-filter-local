@@ -55,6 +55,51 @@ On a cold ONNX CUDA start, when `PRIVACY_FILTER_MAX_TOKENS` is unset, the launch
 
 Choose another published export with `PRIVACY_FILTER_ONNX_FILE`, for example `onnx/model_fp16.onnx`. The graph and all of its external data files are downloaded together. q4/q4f16 may be selected only with the CPU provider: CUDA startup refuses them because ONNX Runtime 1.30 returned incomplete findings on the tested RTX 3080. `privacy-filter health` reports the live `backend`, `provider`, `model_file` and `dtype`.
 
+### Benchmarks
+
+`bench/benchmark.py` runs each variant through the real HTTP service against the synthetic corpus in `bench/corpus.json`. The scorer reports:
+
+- strict and partial entity-level precision/recall/F1 using the MUC/SemEval categories: correct, incorrect type, partial boundary, missed and spurious;
+- direct- and quasi-identifier entity recall following TAB's privacy rule: an entity is protected only when every mention is fully masked;
+- false alarms on clean code/configuration records; and
+- span-level disagreements against a reference export.
+
+```bash
+bench/benchmark.py --baseline onnx-cpu-fp16
+```
+
+RTX 3080 / i5-12600KF; 47 synthetic texts (22 hard, 13 clean), 70 annotated spans:
+
+| Variant | Strict F1 | Partial F1 | Direct ER | Quasi ER | Hard F1 | Clean false findings |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `onnx-cuda-fp16` | 0.71 | 0.78 | 83% | 86% | 0.62 | 4 |
+| `onnx-cpu-fp16` | 0.71 | 0.78 | 83% | 86% | 0.63 | 4 |
+| `onnx-cuda-int8` | 0.70 | 0.77 | 83% | 86% | 0.61 | 4 |
+| `onnx-cpu-int8` | 0.71 | 0.78 | 83% | 86% | 0.62 | 4 |
+| `torch-cuda-bf16` | 0.70 | 0.78 | 83% | 86% | 0.60 | 3 |
+| `onnx-cpu-q4f16` | 0.70 | 0.78 | 85% | 86% | 0.63 | 5 |
+| `nemotron-torch-cuda-bf16` | 0.54 | 0.64 | 71% | 71% | 0.52 | 14 |
+
+| Variant | Corpus scan | GPU resident |
+| --- | ---: | ---: |
+| `onnx-cuda-fp16` | 0.18s (3.8 ms/text) | 4,348 MiB |
+| `onnx-cuda-int8` | 7.72s (164 ms/text) | 504 MiB |
+| `torch-cuda-bf16` | 5.02s (107 ms/text) | 2,968 MiB |
+| `nemotron-torch-cuda-bf16` | 3.33s (71 ms/text) | 2,968 MiB |
+| `onnx-cpu-fp16` | 3.17s (67 ms/text) | - |
+| `onnx-cpu-int8` | 7.76s (165 ms/text) | - |
+| `onnx-cpu-q4f16` | 8.49s (181 ms/text) | - |
+
+The default model's scores stay close, but its exports do not return identical findings: int8 differed from CPU fp16 on 4/47 texts, q4f16 on 7/47, native torch on 5/47, and CUDA fp16 on only 1/47. q4f16 also added two false person findings to a clean issue description. The hard tier separates from the full corpus (`0.60–0.63` versus `0.70–0.71` strict F1).
+
+The runtime trade-off is large. CUDA fp16 is about 43 times faster than CUDA int8 on these short requests, but holds 4.35 GiB versus 504 MiB. CPU fp16 is about 2.4 times faster than CPU int8 on this machine. The int8 default is therefore the low-VRAM choice, not the fastest one.
+
+More importantly, 83% direct-identifier entity recall is not a passing grade. The corpus exposed incomplete masking of two hyphenated role-email addresses, unusual phone formats, a repeated name, a spelled-out email and several secret formats. Nemotron's finer 55-label taxonomy did worse here even after canonical label mapping and adjacent-span merging: 71% direct-identifier entity recall, 14 false findings in 13 clean texts, and findings that differed from fp16 on 33/47 records.
+
+This is a small synthetic regression benchmark, not an estimate of production accuracy. GPU residency is the peak on these short records; full 4096-token windows use more.
+
+Methodology references: [nervaluate's entity-level MUC/SemEval scoring](https://github.com/MantisAI/nervaluate), [Presidio's character-span evaluation](https://presidio-research.dataprivacystack.org/span_evaluation/), and [the Text Anonymization Benchmark](https://aclanthology.org/2022.cl-4.19/).
+
 ## Commands
 
 | Command | Purpose |

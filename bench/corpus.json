@@ -1,0 +1,489 @@
+{
+  "_comment": [
+    "Synthetic benchmark corpus. Every name, address, number, key and domain",
+    "below was invented for this file or taken from a reserved example range",
+    "(.invalid, 555 numbers, AWS's documented placeholder key); none of it is",
+    "derived from a real person or account.",
+    "",
+    "A record is a list of chunks. A plain string is background text; a",
+    "[label, text] pair is an expected finding; an optional third element is an",
+    "entity key, and chunks sharing a key are mentions of the same person or",
+    "thing. Offsets are computed from the chunks at load time, so re-wording a",
+    "record cannot leave stale ground truth behind.",
+    "",
+    "Tiers: 'plain' is well-formed PII any working model should get; 'hard' is",
+    "where exports and models are expected to diverge -- ambiguous names,",
+    "unusual formats, entities mentioned more than once; 'clean' records are",
+    "annotated as containing nothing, and any finding in them is a false alarm.",
+    "The clean records avoid bare log timestamps and IP addresses on purpose:",
+    "models with a finer taxonomy label those, and that is a vocabulary",
+    "difference rather than a false positive."
+  ],
+  "records": [
+    {
+      "id": "support-signature",
+      "tier": "plain",
+      "chunks": [
+        "Contact ",
+        ["private_person", "Jeanne Dupont", "dupont"],
+        " at ",
+        ["private_email", "jeanne.dupont@example.invalid", "dupont-mail"],
+        " or ",
+        ["private_phone", "+33 1 23 45 67 89", "dupont-phone"],
+        "."
+      ]
+    },
+    {
+      "id": "shipping-address",
+      "tier": "plain",
+      "chunks": [
+        "Ship the replacement unit to ",
+        ["private_person", "Marcus Oyelaran", "oyelaran"],
+        ", ",
+        ["private_address", "48 Rue des Tilleuls, 75012 Paris", "oyelaran-home"],
+        ", and confirm by Friday."
+      ]
+    },
+    {
+      "id": "invoice-line",
+      "tier": "plain",
+      "chunks": [
+        "Invoice 2291 settled against account ",
+        ["account_number", "DE89 3704 0044 0532 0130 00", "iban-1"],
+        " on ",
+        ["private_date", "14 March 2024", "settled-on"],
+        "."
+      ]
+    },
+    {
+      "id": "leaked-key",
+      "tier": "plain",
+      "chunks": [
+        "The staging worker still reads ",
+        ["secret", "sk-live-9f3c2ab471de40c8ae1f7b25", "stripe-ish"],
+        " from its environment; rotate it before the demo."
+      ]
+    },
+    {
+      "id": "profile-url",
+      "tier": "plain",
+      "chunks": [
+        "Their portfolio is at ",
+        ["private_url", "https://portfolio.example.invalid/ines-ferreira", "ines-site"],
+        " if you want the longer version of the CV."
+      ]
+    },
+    {
+      "id": "onboarding-note",
+      "tier": "plain",
+      "chunks": [
+        ["private_person", "Ines Ferreira", "ferreira"],
+        " starts on ",
+        ["private_date", "2 September 2025", "start-date"],
+        ". Send the laptop to ",
+        ["private_address", "12 Alderwood Court, Bristol BS1 4TR", "ferreira-home"],
+        "."
+      ]
+    },
+    {
+      "id": "double-contact",
+      "tier": "plain",
+      "chunks": [
+        "Escalation path: ",
+        ["private_email", "oncall-primary@example.invalid", "primary"],
+        " first, then ",
+        ["private_email", "oncall-secondary@example.invalid", "secondary"],
+        ", finally the duty phone ",
+        ["private_phone", "+44 20 7946 0958", "duty"],
+        "."
+      ]
+    },
+    {
+      "id": "credentials-paste",
+      "tier": "plain",
+      "chunks": [
+        "Temporary login for the sandbox: user ",
+        ["private_email", "t.beck@example.invalid", "beck-mail"],
+        ", password ",
+        ["secret", "Xq7!vanadium-lantern-22", "beck-pass"],
+        ". Expires tonight."
+      ]
+    },
+    {
+      "id": "mixed-paragraph",
+      "tier": "plain",
+      "chunks": [
+        "The audit copy went out on ",
+        ["private_date", "11/07/2023", "audit-date"],
+        " to ",
+        ["private_person", "Helena Vogt", "vogt"],
+        " (",
+        ["private_email", "h.vogt@example.invalid", "vogt-mail"],
+        "), who forwarded it to legal without redacting the account ",
+        ["account_number", "GB29 NWBK 6016 1331 9268 19", "iban-2"],
+        "."
+      ]
+    },
+    {
+      "id": "api-token-in-code",
+      "tier": "plain",
+      "chunks": [
+        "client = Client(base_url=\"https://api.example.invalid\", token=\"",
+        ["secret", "ghp_4TqWm2xZ8Lb0Ne6Rd1Yv5Ko9Ps3Ju7Hg", "gh-token"],
+        "\")"
+      ]
+    },
+    {
+      "id": "ticket-handover",
+      "tier": "plain",
+      "chunks": [
+        "Ticket reassigned from ",
+        ["private_person", "Priya Raghunathan", "raghunathan"],
+        " to ",
+        ["private_person", "Tomas Beck", "beck"],
+        ". Customer reachable on ",
+        ["private_phone", "(555) 019-8847", "cust-phone"],
+        " after 14:00."
+      ]
+    },
+    {
+      "id": "prose-mention",
+      "tier": "plain",
+      "chunks": [
+        "As ",
+        ["private_person", "Dr. Amara Nwosu", "nwosu"],
+        " pointed out in review, the fail-closed path is the one that matters; everything else is an optimisation."
+      ]
+    },
+
+    {
+      "id": "name-that-is-a-common-word",
+      "tier": "hard",
+      "chunks": [
+        "Mr. ",
+        ["private_person", "Baker", "baker"],
+        " approved the rye budget, and ",
+        ["private_person", "Baker", "baker"],
+        " also signed the lease for the second oven."
+      ]
+    },
+    {
+      "id": "names-that-are-months",
+      "tier": "hard",
+      "chunks": [
+        ["private_person", "April Sommers", "april"],
+        " filed the appeal while ",
+        ["private_person", "June", "june"],
+        " was on leave until ",
+        ["private_date", "August", "august-month"],
+        "."
+      ]
+    },
+    {
+      "id": "name-split-across-lines",
+      "tier": "hard",
+      "chunks": [
+        "Deliver to:\n",
+        ["private_person", "Marcus\nOyelaran", "marcus-o"],
+        "\nWarehouse 4, gate C"
+      ]
+    },
+    {
+      "id": "diacritics-and-hyphens",
+      "tier": "hard",
+      "chunks": [
+        ["private_person", "Zoë Müller-Achebe", "zoe"],
+        " and ",
+        ["private_person", "Ólafur Sigurðsson", "olafur"],
+        " both signed off on the rollback."
+      ]
+    },
+    {
+      "id": "non-western-name-order",
+      "tier": "hard",
+      "chunks": [
+        "The reviewer of record is ",
+        ["private_person", "Nguyễn Thị Hạnh", "hanh"],
+        ", who also wrote the migration notes."
+      ]
+    },
+    {
+      "id": "same-person-three-ways",
+      "tier": "hard",
+      "chunks": [
+        ["private_person", "Priya Raghunathan", "priya"],
+        " opened the incident. ",
+        ["private_person", "Raghunathan", "priya"],
+        " then paged the database team, and by the time the page cleared ",
+        ["private_person", "Priya", "priya"],
+        " had already written the postmortem."
+      ]
+    },
+    {
+      "id": "phone-formats",
+      "tier": "hard",
+      "chunks": [
+        "Desk ",
+        ["private_phone", "+1-555-019-8847 x31", "desk"],
+        ", mobile ",
+        ["private_phone", "555.0142", "mobile"],
+        ", and the old switchboard on ",
+        ["private_phone", "(0)20 7946 0958", "switchboard"],
+        "."
+      ]
+    },
+    {
+      "id": "spelled-out-email",
+      "tier": "hard",
+      "chunks": [
+        "She said to reach her at ",
+        ["private_email", "hanna dot ito at example dot invalid", "ito-mail"],
+        " because the form kept rejecting the address."
+      ]
+    },
+    {
+      "id": "email-in-git-trailer",
+      "tier": "hard",
+      "chunks": [
+        "Co-authored-by: ",
+        ["private_person", "Rina Halvorsen", "rina"],
+        " <",
+        ["private_email", "rina.halvorsen@example.invalid", "rina-mail"],
+        ">"
+      ]
+    },
+    {
+      "id": "jwt-in-header",
+      "tier": "hard",
+      "chunks": [
+        "curl -H 'Authorization: Bearer ",
+        ["secret", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NSJ9.7wQf3mKpL0aZbXc2VuNrTq", "jwt"],
+        "' https://api.example.invalid/v1/jobs"
+      ]
+    },
+    {
+      "id": "private-key-block",
+      "tier": "hard",
+      "chunks": [
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n",
+        ["secret", "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABlwAAAAdzc2gtcn", "ssh-key"],
+        "\n-----END OPENSSH PRIVATE KEY-----"
+      ]
+    },
+    {
+      "id": "cloud-credentials",
+      "tier": "hard",
+      "chunks": [
+        "export AWS_ACCESS_KEY_ID=",
+        ["secret", "AKIAIOSFODNN7EXAMPLE", "aws-id"],
+        "\nexport AWS_SECRET_ACCESS_KEY=",
+        ["secret", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "aws-secret"],
+        ""
+      ]
+    },
+    {
+      "id": "card-details",
+      "tier": "hard",
+      "chunks": [
+        "Charge card ",
+        ["account_number", "4111-1111-1111-1111", "card"],
+        ", expiry ",
+        ["private_date", "09/27", "card-expiry"],
+        ", CVV ",
+        ["secret", "481", "cvv"],
+        ", billed to ",
+        ["private_person", "L. Okonkwo", "okonkwo"],
+        "."
+      ]
+    },
+    {
+      "id": "government-identifiers",
+      "tier": "hard",
+      "chunks": [
+        "Payroll blocked: national insurance number ",
+        ["account_number", "QQ 12 34 56 C", "nino"],
+        " does not match the tax reference ",
+        ["account_number", "1234567890", "utr"],
+        " on file."
+      ]
+    },
+    {
+      "id": "date-formats",
+      "tier": "hard",
+      "chunks": [
+        "Born ",
+        ["private_date", "2023-07-11", "dob-iso"],
+        ", first seen ",
+        ["private_date", "7 Jul 23", "seen-short"],
+        ", discharged ",
+        ["private_date", "Jul 11th", "discharged"],
+        "."
+      ]
+    },
+    {
+      "id": "address-without-keyword",
+      "tier": "hard",
+      "chunks": [
+        "The warehouse moved to ",
+        ["private_address", "Industriestrasse 14, 8005 Zurich", "warehouse"],
+        " last quarter."
+      ]
+    },
+    {
+      "id": "address-with-unit-and-country",
+      "tier": "hard",
+      "chunks": [
+        "Registered office: ",
+        ["private_address", "Flat 2B, 19 Kestrel Way, Leeds LS1 9QT, United Kingdom", "office"],
+        "."
+      ]
+    },
+    {
+      "id": "pii-in-a-log-line",
+      "tier": "hard",
+      "chunks": [
+        "audit actor=",
+        ["private_person", "nadia.kowalski", "nadia-user"],
+        " action=export rows=4182 target=",
+        ["private_email", "n.kowalski@example.invalid", "nadia-mail"],
+        ""
+      ]
+    },
+    {
+      "id": "pii-in-a-markdown-table",
+      "tier": "hard",
+      "chunks": [
+        "| Owner | Contact |\n| --- | --- |\n| ",
+        ["private_person", "Tomas Beck", "beck-2"],
+        " | ",
+        ["private_phone", "555-0142", "beck-phone"],
+        " |"
+      ]
+    },
+    {
+      "id": "url-with-token",
+      "tier": "hard",
+      "chunks": [
+        "Share link: ",
+        ["private_url", "https://drive.example.invalid/u/ines-ferreira/report", "drive-link"],
+        "?access=",
+        ["secret", "T0k3n-9f3c2ab471de40c8", "drive-token"],
+        ""
+      ]
+    },
+    {
+      "id": "calendar-invite",
+      "tier": "hard",
+      "chunks": [
+        "Invite sent to ",
+        ["private_person", "Helena Vogt", "vogt-2"],
+        " for ",
+        ["private_date", "next Tuesday at 09:30", "invite-when"],
+        " at ",
+        ["private_address", "Rue du Marché 8, Geneva", "invite-where"],
+        "."
+      ]
+    },
+    {
+      "id": "initials-and-title",
+      "tier": "hard",
+      "chunks": [
+        "Escalated to ",
+        ["private_person", "Prof. A. N. Mbeki-Torres", "mbeki"],
+        ", who chairs the review board."
+      ]
+    },
+
+    {
+      "id": "clean-changelog",
+      "tier": "clean",
+      "chunks": [
+        "Rewrote the chunk planner so window cuts snap to whitespace, and added a regression test for the overlap boundary. No behaviour change for inputs below one window."
+      ]
+    },
+    {
+      "id": "clean-stacktrace",
+      "tier": "clean",
+      "chunks": [
+        "Traceback (most recent call last):\n  File \"scripts/adaptive_scan.py\", line 212, in scan\n    raise ScanBudgetExhausted(budget)\nadaptive_scan.ScanBudgetExhausted: out of memory at the minimum token budget (256 tokens)"
+      ]
+    },
+    {
+      "id": "clean-config",
+      "tier": "clean",
+      "chunks": [
+        "PRIVACY_FILTER_MAX_TOKENS=2048\nPRIVACY_FILTER_MIN_TOKENS=256\nPRIVACY_FILTER_BACKEND=onnx\nPRIVACY_FILTER_ONNX_PROVIDER=cuda"
+      ]
+    },
+    {
+      "id": "clean-sql",
+      "tier": "clean",
+      "chunks": [
+        "SELECT window_start, window_end, label FROM findings WHERE scan_id = ? ORDER BY window_start;"
+      ]
+    },
+    {
+      "id": "clean-readme",
+      "tier": "clean",
+      "chunks": [
+        "Submit whole files. The service tokenizes the input, splits it into overlapping windows, and reports findings against the original offsets."
+      ]
+    },
+    {
+      "id": "clean-git-metadata",
+      "tier": "clean",
+      "chunks": [
+        "add2674 Add adaptive GPU ONNX backend\n94dc169 Derive window budgets from the model's real context limit\nbranch main tracks origin/main, 2 commits ahead"
+      ]
+    },
+    {
+      "id": "clean-identifiers",
+      "tier": "clean",
+      "chunks": [
+        "job 7f3a1c2e-95b4-4d0a-8e11-6c2b9d4f0a73 finished in 4.2s, image tag v1.8.3, listening on port 8757"
+      ]
+    },
+    {
+      "id": "clean-license-header",
+      "tier": "clean",
+      "chunks": [
+        "Copyright (c) 2024 The Privacy Filter Authors. Licensed under the MIT License. Permission is hereby granted, free of charge, to any person obtaining a copy of this software."
+      ]
+    },
+    {
+      "id": "clean-shell-session",
+      "tier": "clean",
+      "chunks": [
+        "podman build -q -t localhost/privacy-filter-local:onnx -f Containerfile .\npodman run --detach --replace --name privacy-filter-local --publish 127.0.0.1:8757:8757 localhost/privacy-filter-local:onnx"
+      ]
+    },
+    {
+      "id": "clean-benchmark-prose",
+      "tier": "clean",
+      "chunks": [
+        "The launcher selects 4096 tokens at 6144 MiB free, 2048 at 3072 MiB, 1024 at 1536 MiB, and 256 below that, which leaves roughly 0.75 GiB above the measured peaks."
+      ]
+    },
+    {
+      "id": "clean-product-names",
+      "tier": "clean",
+      "chunks": [
+        "Tested with ONNX Runtime 1.30 on an NVIDIA RTX 3080 under Podman 5.2, against the int8 export rather than q4f16."
+      ]
+    },
+    {
+      "id": "clean-code",
+      "tier": "clean",
+      "chunks": [
+        "def plan_chunks(text, offsets, budget, overlap):\n    if budget <= overlap:\n        raise ValueError(\"overlap must be smaller than the budget\")\n    return [(start, end) for start, end in windows(offsets, budget, overlap)]"
+      ]
+    },
+    {
+      "id": "clean-issue-text",
+      "tier": "clean",
+      "chunks": [
+        "Reopening: the retry path still swallows the allocator error when the minimum window fails, so the caller sees a bare connection reset instead of the refusal. Repro is in the linked gist."
+      ]
+    }
+  ]
+}

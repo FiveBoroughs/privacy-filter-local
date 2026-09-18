@@ -259,8 +259,13 @@ def container_running() -> bool:
 
 # Python's final traceback line -- "adaptive_scan.BudgetExceedsContextLimit: ..."
 # or "RuntimeError: ..." -- carries the refusal the service wants read. Matching
-# only that keeps this from being a blind log dump.
-FATAL_LINE = re.compile(r"^(?:\w+\.)*\w*(?:Error|Exception):\s*(\S.*)$")
+# only that keeps this from being a blind log dump. The class name is not
+# required to end in Error or Exception: ONNX Runtime raises
+# `onnxruntime.capi.onnxruntime_pybind11_state.Fail`, and missing it cost the
+# caller a full readiness timeout in place of the allocator failure. Requiring a
+# lowercase letter in the name is what keeps uvicorn's "INFO:" and "ERROR:"
+# level prefixes from being read as exceptions.
+FATAL_LINE = re.compile(r"^(?:\w+\.)*\w*[a-z]\w*:\s*(\S.*)$")
 
 
 def container_failure() -> str | None:
