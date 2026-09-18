@@ -10,18 +10,22 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 BACKEND = os.environ.get("PRIVACY_FILTER_BACKEND", "torch").lower()
-SUPPORTED_BACKENDS = {"torch", "onnx"}
+SUPPORTED_BACKENDS = {"gliner2", "onnx", "torch"}
 if BACKEND not in SUPPORTED_BACKENDS:
     choices = ", ".join(sorted(SUPPORTED_BACKENDS))
     raise RuntimeError(f"PRIVACY_FILTER_BACKEND must be one of: {choices}")
 
 # CPU ONNX images deliberately do not contain torch or transformers. Importing
-# them only for the default backend keeps that image small and GPU-independent.
-if BACKEND == "torch":
+# heavy runtimes only for backends that use them keeps that image small and
+# GPU-independent. GLiNER2 imports its own compatible model stack lazily.
+if BACKEND in {"gliner2", "torch"}:
     import torch
-    from transformers import pipeline
 else:
     torch = None
+
+if BACKEND == "torch":
+    from transformers import pipeline
+else:
     pipeline = None
 
 from adaptive_scan import (
@@ -41,10 +45,14 @@ from adaptive_scan import (
 from text_chunking import Span, plan_chunks
 
 
-DEFAULT_MODEL = "openai/privacy-filter"
+DEFAULT_TORCH_MODEL = "openai/privacy-filter"
+DEFAULT_GLINER2_MODEL = "fastino/gliner2-privacy-filter-PII-multi"
+DEFAULT_MODEL = DEFAULT_GLINER2_MODEL if BACKEND == "gliner2" else DEFAULT_TORCH_MODEL
 DEFAULT_ONNX_FILE = "onnx/model_quantized.onnx"
 ONNX_FILE = os.environ.get("PRIVACY_FILTER_ONNX_FILE", DEFAULT_ONNX_FILE)
 ONNX_PROVIDER = os.environ.get("PRIVACY_FILTER_ONNX_PROVIDER", "auto").lower()
+GLINER2_DEVICE = os.environ.get("PRIVACY_FILTER_GLINER2_DEVICE", "auto").lower()
+GLINER2_THRESHOLD = float(os.environ.get("PRIVACY_FILTER_GLINER2_THRESHOLD", "0.5"))
 
 # Reserve a little headroom below the model's context limit for the special
 # tokens the pipeline adds, plus slack for any tokenization drift between our
@@ -110,6 +118,15 @@ def load_onnx_classifier() -> Any:
 
     return OnnxClassifier(state.model_name, ONNX_FILE, provider=ONNX_PROVIDER)
 
+def load_gliner2_classifier() -> Any:
+    from gliner2_backend import Gliner2Classifier
+
+    return Gliner2Classifier(
+        state.model_name,
+        device=GLINER2_DEVICE,
+        threshold=GLINER2_THRESHOLD,
+    )
+
 
 def load_classifier() -> None:
     if BACKEND == "torch":
@@ -125,6 +142,10 @@ def load_classifier() -> None:
             # what lets the MoE share the GPU with a game without OOM-ing.
             model_kwargs={"dtype": "auto"},
         )
+    elif BACKEND == "gliner2":
+        state.classifier = load_gliner2_classifier()
+        state.gpu_name = state.classifier.gpu_name
+        state.provider_name = state.classifier.provider
     else:
         state.gpu_name = ""
         state.classifier = load_onnx_classifier()
@@ -235,11 +256,12 @@ def classify_window(chunk: str) -> list[dict[str, Any]]:
 
 def oom_error_types() -> tuple[type[BaseException], ...]:
     """Memory errors worth retrying at a smaller window."""
-    if BACKEND == "onnx":
+    if BACKEND == "onnx" or (BACKEND == "gliner2" and state.provider_name != "CUDA"):
         # ORT does not expose a distinct CPU OOM exception. A broad ORT error
         # can mean an invalid graph or input, and retrying that as if it were
         # memory pressure would hide the real failure. Native MemoryError is the
         # only unambiguous case; anything else propagates and callers fail closed.
+        # The same rule applies to GLiNER2 on CPU.
         return (MemoryError,)
     types: list[type[BaseException]] = []
     for candidate in (
@@ -253,7 +275,7 @@ def oom_error_types() -> tuple[type[BaseException], ...]:
 
 
 def clear_memory() -> None:
-    if BACKEND == "torch":
+    if torch is not None and state.provider_name == "CUDA":
         torch.cuda.empty_cache()
 
 
@@ -298,7 +320,7 @@ def health() -> dict[str, Any]:
     policy = scanner.policy if scanner is not None else None
     cuda_available = bool(
         (torch is not None and torch.cuda.is_available())
-        or state.provider_name == "CUDAExecutionProvider"
+        or state.provider_name in {"CUDA", "CUDAExecutionProvider"}
     )
     return {
         "ok": state.classifier is not None,
@@ -348,7 +370,7 @@ def scan(text: str) -> list[Finding]:
     try:
         return scanner.scan(text)
     except ScanBudgetExhausted as exc:
-        gpu_memory = BACKEND == "torch" or state.provider_name == "CUDAExecutionProvider"
+        gpu_memory = state.provider_name in {"CUDA", "CUDAExecutionProvider"}
         resource = "GPU memory" if gpu_memory else "memory"
         remedy = (
             "Free VRAM (e.g. close a game), lower PRIVACY_FILTER_MAX_TOKENS, or retry."

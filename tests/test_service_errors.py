@@ -99,6 +99,7 @@ class FakeTokenizer:
 class FakeClassifier:
     provider = "CPUExecutionProvider"
 
+    gpu_name = ""
     def __init__(self, behaviour=None):
         self.tokenizer = FakeTokenizer()
         self.model = types.SimpleNamespace(
@@ -217,6 +218,13 @@ class ScanErrorTest(ServiceTestCase):
         service.torch.cuda.is_available = lambda: False
         self.assertEqual(service.scan("hello"), [])
 
+    def test_gliner2_scans_without_cuda(self):
+        self.configure_backend("gliner2")
+        self.install(lambda chunk: [])
+        service.state.provider_name = "CPU"
+        service.torch.cuda.is_available = lambda: False
+        self.assertEqual(service.scan("hello"), [])
+
 
 class EndpointTest(ServiceTestCase):
     def behaviour(self, chunk):
@@ -278,6 +286,17 @@ class HealthTest(ServiceTestCase):
         self.assertEqual(health["provider"], "CUDAExecutionProvider")
         self.assertTrue(health["cuda_available"])
         self.assertEqual(health["model_file"], service.ONNX_FILE)
+
+    def test_gliner2_cpu_health_does_not_claim_cuda(self):
+        self.configure_backend("gliner2")
+        self.install()
+        service.state.provider_name = "CPU"
+        service.torch.cuda.is_available = lambda: False
+        health = service.health()
+        self.assertEqual(health["backend"], "gliner2")
+        self.assertEqual(health["provider"], "CPU")
+        self.assertFalse(health["cuda_available"])
+        self.assertIsNone(health["model_file"])
 
     def test_health_before_load_reports_not_ok(self):
         health = service.health()
@@ -358,6 +377,22 @@ class BudgetWiringTest(ServiceTestCase):
         service.load_classifier()
         self.assertIs(service.state.classifier, classifier)
         self.assertEqual(service.state.provider_name, "CPUExecutionProvider")
+        self.assertEqual(service.oom_error_types(), (MemoryError,))
+
+    def test_gliner2_loads_through_its_adapter_and_reserves_schema_tokens(self):
+        self.configure_backend("gliner2")
+        classifier = FakeClassifier()
+        classifier.provider = "CPU"
+        classifier.tokenizer.num_special_tokens_to_add = lambda pair=False: 137
+        classifier.model.config.max_position_embeddings = 512
+        original = service.load_gliner2_classifier
+        service.load_gliner2_classifier = lambda: classifier
+        self.addCleanup(setattr, service, "load_gliner2_classifier", original)
+        service.torch.cuda.is_available = lambda: False
+        service.load_classifier()
+        self.assertIs(service.state.classifier, classifier)
+        self.assertEqual(service.state.provider_name, "CPU")
+        self.assertEqual(service.state.scanner.policy.max_tokens, 359)
         self.assertEqual(service.oom_error_types(), (MemoryError,))
 
     def test_slow_tokenizer_falls_back_to_character_offsets(self):

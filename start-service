@@ -7,9 +7,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND="${PRIVACY_FILTER_BACKEND:-torch}"
 case "$BACKEND" in
-  torch|onnx) ;;
+  gliner2|onnx|torch) ;;
   *)
-    echo "ERROR: PRIVACY_FILTER_BACKEND must be 'torch' or 'onnx', got '$BACKEND'." >&2
+    echo "ERROR: PRIVACY_FILTER_BACKEND must be 'gliner2', 'onnx' or 'torch', got '$BACKEND'." >&2
     exit 1
     ;;
 esac
@@ -21,15 +21,31 @@ case "$ONNX_PROVIDER" in
     exit 1
     ;;
 esac
+GLINER2_DEVICE="${PRIVACY_FILTER_GLINER2_DEVICE:-auto}"
+case "$GLINER2_DEVICE" in
+  auto|cpu|cuda) ;;
+  *)
+    echo "ERROR: PRIVACY_FILTER_GLINER2_DEVICE must be 'auto', 'cpu' or 'cuda', got '$GLINER2_DEVICE'." >&2
+    exit 1
+    ;;
+esac
 if [ "$BACKEND" = "onnx" ] \
    && [ "$ONNX_PROVIDER" = "cuda" ] \
    && ! command -v nvidia-smi >/dev/null 2>&1; then
   echo "ERROR: PRIVACY_FILTER_ONNX_PROVIDER=cuda, but nvidia-smi is unavailable." >&2
   exit 1
 fi
+if [ "$BACKEND" = "gliner2" ] \
+   && [ "$GLINER2_DEVICE" = "cuda" ] \
+   && ! command -v nvidia-smi >/dev/null 2>&1; then
+  echo "ERROR: PRIVACY_FILTER_GLINER2_DEVICE=cuda, but nvidia-smi is unavailable." >&2
+  exit 1
+fi
 DEFAULT_TAG="gpu"
 if [ "$BACKEND" = "onnx" ]; then
   DEFAULT_TAG="onnx"
+elif [ "$BACKEND" = "gliner2" ]; then
+  DEFAULT_TAG="gliner2"
 fi
 IMAGE="${PRIVACY_FILTER_IMAGE:-localhost/privacy-filter-local:${DEFAULT_TAG}}"
 CONTAINER="${PRIVACY_FILTER_CONTAINER:-privacy-filter-local}"
@@ -84,7 +100,8 @@ mkdir -p "$ROOT/cache"
 env_args=()
 for name in PRIVACY_FILTER_MAX_TOKENS PRIVACY_FILTER_MIN_TOKENS \
             PRIVACY_FILTER_TOKEN_SHRINK_FACTOR PRIVACY_FILTER_CHUNK_OVERLAP_TOKENS \
-            PRIVACY_FILTER_CONTEXT_LIMIT PRIVACY_FILTER_MODEL PRIVACY_FILTER_ONNX_FILE; do
+            PRIVACY_FILTER_CONTEXT_LIMIT PRIVACY_FILTER_MODEL PRIVACY_FILTER_ONNX_FILE \
+            PRIVACY_FILTER_GLINER2_THRESHOLD; do
   if [ -n "${!name:-}" ]; then
     env_args+=(--env "${name}=${!name}")
     echo "Passing ${name}=${!name} to the service"
@@ -93,11 +110,16 @@ done
 env_args+=(--env "PRIVACY_FILTER_BACKEND=${BACKEND}")
 if [ "$BACKEND" = "onnx" ]; then
   env_args+=(--env "PRIVACY_FILTER_ONNX_PROVIDER=${ONNX_PROVIDER}")
+elif [ "$BACKEND" = "gliner2" ]; then
+  env_args+=(--env "PRIVACY_FILTER_GLINER2_DEVICE=${GLINER2_DEVICE}")
 fi
-
 device_args=()
 if [ "$BACKEND" = "torch" ]; then
   device_args+=(--device nvidia.com/gpu=all)
+elif [ "$BACKEND" = "gliner2" ]; then
+  if [ "$GLINER2_DEVICE" != "cpu" ] && command -v nvidia-smi >/dev/null 2>&1; then
+    device_args+=(--device nvidia.com/gpu=all)
+  fi
 elif [ "$ONNX_PROVIDER" != "cpu" ] && command -v nvidia-smi >/dev/null 2>&1; then
   # auto uses CUDA when a device is present and CPU elsewhere.
   device_args+=(--device nvidia.com/gpu=all)

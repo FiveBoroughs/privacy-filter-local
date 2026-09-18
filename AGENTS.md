@@ -2,7 +2,7 @@
 
 Instructions for coding agents working in this repository. `CLAUDE.md` is a symlink to this file.
 
-This is a local PII scanner: a containerized torch/CUDA or ONNX/CUDA-or-CPU service, a CLI, and a git pre-commit hook. It handles text people expect never to leave their machine, and its value is entirely in being trustworthy about that. Read the invariants before changing behaviour.
+This is a local PII scanner: a containerized torch/CUDA, ONNX/CUDA-or-CPU, or GLiNER2/CUDA-or-CPU service, a CLI, and a git pre-commit hook. It handles text people expect never to leave their machine, and its value is entirely in being trustworthy about that. Read the invariants before changing behaviour.
 
 ## Invariants
 
@@ -22,6 +22,7 @@ Breaking any of these is a bug even if the tests pass.
 | `scripts/adaptive_scan.py` | Budget ladder, OOM retries, dedup, redaction. Pure, dependencies injected. |
 | `scripts/token_classification.py` | Transformers-compatible BIO grouping. Pure, no dependencies. |
 | `scripts/onnx_backend.py` | Raw ONNX Runtime classifier, tokenizer and Hub download. |
+| `scripts/gliner2_backend.py` | GLiNER2 adapter, schema budget, canonical labels and offset validation. |
 | `scripts/privacy_filter_service.py` | Thin FastAPI/backend wiring. Heavy imports are conditional. |
 | `scripts/privacy_filter_client.py` | CLI. Standard library only. |
 | `scripts/service_control.py` | Container lifecycle, locking, leases. Standard library only. |
@@ -31,7 +32,7 @@ Breaking any of these is a bug even if the tests pass.
 | `bench/scoring.py` | Pure MUC/SemEval span scoring and TAB-style privacy recall. |
 | `bench/corpus.json` | Synthetic benchmark corpus; ground truth is inline, offsets are derived from it. |
 
-The service files copied into an image are enumerated in `Containerfile`; add any new runtime module there. The torch and ONNX images install different pinned requirement sets.
+The service files copied into an image are enumerated in `Containerfile`; add any new runtime module there. The torch, ONNX and GLiNER2 images install different pinned requirement sets.
 
 ## Working on it
 
@@ -39,7 +40,7 @@ Run the suite with `python3 -m unittest discover -s tests`. It needs no GPU and 
 
 Use `./privacy-filter-service ensure` to bring the service up, and `./privacy-filter-service stop` to take it down. Do not run `./start-service` directly while anything might be scanning: it ends in `podman run --replace`, and a scan that outlasts podman's ten-second stop grace is SIGKILLed, which the caller sees as a bare connection failure. `ensure` holds a lock and reuses a healthy service in about 50ms. `stop` refuses while another caller holds a lease or a scan is in flight; `--force` overrides that.
 
-To try a different model or backend without code changes, set `PRIVACY_FILTER_MODEL` or `PRIVACY_FILTER_BACKEND` and use `privacy-filter-service restart`; `ensure` deliberately reuses an already healthy service. `start-service` forwards the budget, model, backend and ONNX-file environment variables into the container.
+To try a different model or backend without code changes, set `PRIVACY_FILTER_MODEL` or `PRIVACY_FILTER_BACKEND` and use `privacy-filter-service restart`; `ensure` deliberately reuses an already healthy service. `start-service` forwards the budget, model, backend, ONNX and GLiNER2 environment variables into the container.
 
 Changing the CLI surface, exit codes or environment variables means updating `README.md` and `skill/SKILL.md` together, then re-running `./install-skill`.
 
@@ -56,12 +57,15 @@ Do not re-derive these; they were measured on an RTX 3080 sharing the GPU with a
 | Cold start to ready | 6 to 10 seconds, which is why there is no keep-warm mode |
 | Warm `ensure` | about 50ms |
 | 61 KB scan | under 2 seconds warm |
-| 1 MiB staged diff | about 6 minutes |
-| Container image | torch/CUDA 6.28 GB; ONNX CUDA+CPU 1.51 GB |
+| Container image | torch/CUDA 6.28 GB; ONNX CUDA+CPU 1.51 GB; GLiNER2 CUDA+CPU 6.29 GB |
 
 ## Traps
 
 The tokenizer does not know the model's real context limit. `resolve_context_limit` in `adaptive_scan.py` takes it from the model config (`max_seq_len`, `max_position_embeddings`, `n_positions`, including nested encoder configs, smallest wins); `tokenizer.model_max_length` may only lower that, never establish it. A window bigger than the model accepts is truncated silently and findings past the cut vanish from a scan that reports success, so a model that declares no limit refuses to start rather than falling back to a guess. Adding a backend means declaring its real limit there — not widening the guard.
+
+GLiNER2's mDeBERTa encoder accepts 512 total tokens, not 512 text tokens: its encoded 42-label schema shares that window. `Gliner2Tokenizer.num_special_tokens_to_add()` reports the schema's measured encoded length so `window_budget` reserves it before planning text. Never replace this with a fixed guess or let GLiNER2's huge `tokenizer.model_max_length` establish the limit. The backend exposes the nested encoder config, whose `max_position_embeddings` is authoritative.
+
+GLiNER2 2.0 declares `transformers<5`, but the published PII checkpoint was saved by transformers 5.8 and its tokenizer configuration fails to load under 4.57. The GLiNER2 image therefore pins the tested transformers 5.17 runtime and installs gliner2 itself without dependencies. Do not let a normal dependency resolution silently downgrade transformers. The adapter requests all 42 published labels, maps them into the service's stable eight-label vocabulary, and rejects missing, inconsistent or duplicate offsets rather than reconstructing them with `text.find`.
 
 The ONNX backend defaults to `onnx/model_quantized.onnx` (int8, 1.5 GB weights), not q4f16. On the 30-text synthetic CPU comparison, int8 matched fp16 ONNX on all 55 findings; q4f16 had 4 misses and 5 additions. On CUDA/RTX 3080, ONNX Runtime 1.30 reported no valid int4 MoE GEMM configuration and returned severely incomplete q4f16 findings, so q4/q4f16 are refused whenever CUDAExecutionProvider is active. `PRIVACY_FILTER_ONNX_FILE` makes exports selectable for CPU; changing the CUDA-safe default requires another recall comparison. The raw backend must preserve the exact `TokenClassificationPipeline` `simple` grouping semantics in `token_classification.py`; its E-/S- behavior is odd but downstream merging depends on it.
 

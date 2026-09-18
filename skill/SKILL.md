@@ -12,9 +12,9 @@ Use the local OpenAI Privacy Filter wrapper at:
 /path/to/privacy-filter-local/privacy-filter
 ```
 
-The wrapper calls a local-only service at `127.0.0.1:8757`. The default torch backend requires an NVIDIA GPU; `PRIVACY_FILTER_BACKEND=onnx` selects ONNX Runtime, preferring CUDA and falling back to CPU. `PRIVACY_FILTER_ONNX_PROVIDER=cuda` requires CUDA without fallback; `cpu` forces CPU. Do not paste raw sensitive text into remote tools, web search, hosted inference APIs, issue comments, PR comments, or model prompts before running this local filter.
+The wrapper calls a local-only service at `127.0.0.1:8757`. The default torch backend requires an NVIDIA GPU. `PRIVACY_FILTER_BACKEND=onnx` selects ONNX Runtime; `PRIVACY_FILTER_BACKEND=gliner2` selects the multilingual 42-label GLiNER2 PII model. Both alternative backends prefer CUDA and fall back to CPU unless their provider/device variable requires one explicitly. Do not paste raw sensitive text into remote tools, web search, hosted inference APIs, issue comments, PR comments, or model prompts before running this local filter.
 
-Submit whole files. The service splits large inputs into overlapping token windows itself and reports findings against the original offsets — never pre-chunk, truncate, or loop over slices of the input yourself. Torch CUDA and ONNX CUDA shrink a window on allocator OOM. ONNX CPU retries only native `MemoryError`; ambiguous runtime failures propagate and callers fail closed rather than being misreported as retryable OOM.
+Submit whole files. The service splits large inputs into overlapping token windows itself and reports findings against the original offsets — never pre-chunk, truncate, or loop over slices of the input yourself. Torch CUDA, GLiNER2 CUDA and ONNX CUDA shrink a window on allocator OOM. CPU backends retry only native `MemoryError`; ambiguous runtime failures propagate and callers fail closed rather than being misreported as retryable OOM.
 
 ## Service lifecycle
 
@@ -24,11 +24,13 @@ Use one command for the whole lifecycle. Do **not** run `start-service` and poll
 /path/to/privacy-filter-local/privacy-filter-service ensure   # default: torch/CUDA
 PRIVACY_FILTER_BACKEND=onnx /path/to/privacy-filter-local/privacy-filter-service ensure  # CUDA if present
 PRIVACY_FILTER_BACKEND=onnx PRIVACY_FILTER_ONNX_PROVIDER=cpu /path/to/privacy-filter-local/privacy-filter-service restart
+PRIVACY_FILTER_BACKEND=gliner2 /path/to/privacy-filter-local/privacy-filter-service restart  # CUDA if present
+PRIVACY_FILTER_BACKEND=gliner2 PRIVACY_FILTER_GLINER2_DEVICE=cpu /path/to/privacy-filter-local/privacy-filter-service restart
 /path/to/privacy-filter-local/privacy-filter-service status   # report state, change nothing
 /path/to/privacy-filter-local/privacy-filter-service stop     # stop and release resources
 ```
 
-`ensure` is idempotent, takes a lock so concurrent callers cannot replace each other's container, and prints `started` or `reused` — run it before any scan and it costs ~50ms when the service is already up. Use `restart`, not `ensure`, when changing the backend of an already healthy service: reuse is deliberate. A cold torch start takes about 6-10s; stop it when you are done and give the VRAM back.
+`ensure` is idempotent, takes a lock so concurrent callers cannot replace each other's container, and prints `started` or `reused` — run it before any scan and it costs about 50ms when the service is already up. Use `restart`, not `ensure`, when changing the backend of an already healthy service: reuse is deliberate. Stop a GPU backend when you are done and give the VRAM back.
 
 `status` exit codes: `0` healthy, `1` down, `2` running but not ready, `3` the torch backend is running without a GPU.
 
@@ -90,18 +92,20 @@ By default JSON findings omit raw matched text. Add `--include-text` only when t
 | 6 | Other service error |
 | 7 | Scan did not finish before the timeout; nothing was scanned |
 
-Codes 2 to 7 all mean the content was **not** scanned. Treat them as "still unsafe to send anywhere", never as a pass. For code 5, free memory, lower `PRIVACY_FILTER_MAX_TOKENS`, or retry; on torch, a running game is the usual cause.
+Codes 2 to 7 all mean the content was **not** scanned. Treat them as "still unsafe to send anywhere", never as a pass. For code 5, free memory, lower `PRIVACY_FILTER_MAX_TOKENS`, or retry; on a CUDA backend, a running game is the usual cause.
 
 ## Large inputs and memory
 
-On a cold ONNX CUDA start, an unset `PRIVACY_FILTER_MAX_TOKENS` is selected from free VRAM: 4096 tokens at 6 GiB free, 2048 at 3 GiB, 1024 at 1.5 GiB, and 256 below that. An explicit maximum overrides this selection. During requests, torch CUDA and ONNX CUDA discard an OOM window's results, free the cache when the backend supports it, and retry only that span at `PRIVACY_FILTER_TOKEN_SHRINK_FACTOR` of the budget, down to `PRIVACY_FILTER_MIN_TOKENS`. Windows that already succeeded are not rescanned; if the minimum still does not fit, the request fails closed with HTTP 503 and no partial findings. ONNX CPU uses the same windows and overlap, but only a native `MemoryError` is unambiguously retryable; other ONNX Runtime errors propagate and fail closed.
+On a cold ONNX CUDA start, an unset `PRIVACY_FILTER_MAX_TOKENS` is selected from free VRAM: 4096 tokens at 6 GiB free, 2048 at 3 GiB, 1024 at 1.5 GiB, and 256 below that. An explicit maximum overrides this selection. During requests, CUDA backends discard an OOM window's results, free the cache when supported, and retry only that span at `PRIVACY_FILTER_TOKEN_SHRINK_FACTOR` of the budget, down to `PRIVACY_FILTER_MIN_TOKENS`. Windows that already succeeded are not rescanned; if the minimum still does not fit, the request fails closed with HTTP 503 and no partial findings. CPU backends retry only native `MemoryError`; other runtime errors propagate and fail closed.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `PRIVACY_FILTER_BACKEND` | `torch` | `torch` or `onnx` |
+| `PRIVACY_FILTER_BACKEND` | `torch` | `torch`, `onnx` or `gliner2` |
 | `PRIVACY_FILTER_ONNX_PROVIDER` | `auto` | `auto` prefers CUDA then CPU; `cuda` requires CUDA; `cpu` forces CPU |
 | `PRIVACY_FILTER_ONNX_FILE` | `onnx/model_quantized.onnx` | Export loaded by ONNX; q4 exports are refused on CUDA |
-| `PRIVACY_FILTER_MAX_TOKENS` | 4096 or ONNX CUDA auto-selection | Starting window size, capped by the model's context limit |
+| `PRIVACY_FILTER_GLINER2_DEVICE` | `auto` | `auto` prefers CUDA then CPU; `cuda` requires CUDA; `cpu` forces CPU |
+| `PRIVACY_FILTER_GLINER2_THRESHOLD` | `0.5` | Minimum confidence for GLiNER2 findings |
+| `PRIVACY_FILTER_MAX_TOKENS` | backend-derived | Starting text-window size, capped by model context after fixed schema tokens |
 | `PRIVACY_FILTER_MIN_TOKENS` | 256 | Smallest window tried before giving up |
 | `PRIVACY_FILTER_TOKEN_SHRINK_FACTOR` | 0.5 | Backoff applied per retry |
 | `PRIVACY_FILTER_CHUNK_OVERLAP_TOKENS` | 64 | Tokens each window re-reads, so PII cannot hide in a cut |
@@ -113,7 +117,7 @@ A timeout (exit 7) is reported separately from an unreachable service (exit 3): 
 
 `privacy-filter health` reports the backend, provider, model file, dtype, live budgets and retry ladder. Inference is serialized in-process, so two concurrent requests cannot allocate transient memory at the same time.
 
-Windows are never larger than the model's own maximum sequence length; `health` reports it as `context_limit`. A larger window would be truncated silently and findings past the cut would vanish from a scan that reported success, so the service refuses to start when `PRIVACY_FILTER_MAX_TOKENS` is set above it, or when the model declares no limit for `PRIVACY_FILTER_CONTEXT_LIMIT` to supply. Neither is a scan failure to work around: nothing has been scanned.
+Windows are never larger than the model's own maximum sequence length; `health` reports it as `context_limit`. A larger window would be truncated silently and findings past the cut would vanish from a scan that reported success, so the service refuses to start when `PRIVACY_FILTER_MAX_TOKENS` is set above it, or when the model declares no limit for `PRIVACY_FILTER_CONTEXT_LIMIT` to supply. GLiNER2 also reserves the exact encoded size of its fixed 42-label schema before selecting a text budget. Neither case is a scan failure to work around: nothing has been scanned.
 
 ## Git pre-commit hook
 

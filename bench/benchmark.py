@@ -45,12 +45,12 @@ BASE_URL = os.environ.get("PRIVACY_FILTER_URL", "http://127.0.0.1:8757")
 CONTAINER = os.environ.get("PRIVACY_FILTER_CONTAINER", "privacy-filter-local")
 DEFAULT_MODEL = "openai/privacy-filter"
 NEMOTRON = "OpenMed/privacy-filter-nemotron"
+GLINER2 = "fastino/gliner2-privacy-filter-PII-multi"
 
-# Both models declare a 131072-token context, so a variant is only ever
-# distinguished by its runtime, its export and its weights -- never by a
-# different window size. The window is pinned so latency stays comparable and
-# the cold-start VRAM selection in start-service cannot change it underneath a
-# measurement.
+# The default and Nemotron models use 4096-token benchmark windows. GLiNER2's
+# mDeBERTa encoder accepts 512 total tokens, including its 42-label schema, so
+# that variant lets the service derive a safe text budget from the real context
+# limit and measured schema overhead.
 WINDOW_TOKENS = "4096"
 
 
@@ -59,6 +59,7 @@ class Variant:
     name: str
     env: dict[str, str]
     note: str = ""
+    max_tokens: str | None = WINDOW_TOKENS
 
 
 VARIANTS = (
@@ -122,6 +123,16 @@ VARIANTS = (
         {"PRIVACY_FILTER_BACKEND": "torch", "PRIVACY_FILTER_MODEL": NEMOTRON},
         "55 entity types, no ONNX export",
     ),
+    Variant(
+        "gliner2-cuda-fp16",
+        {
+            "PRIVACY_FILTER_BACKEND": "gliner2",
+            "PRIVACY_FILTER_GLINER2_DEVICE": "cuda",
+            "PRIVACY_FILTER_MODEL": GLINER2,
+        },
+        "42 canonicalized entity types, multilingual",
+        max_tokens=None,
+    ),
 )
 
 
@@ -184,7 +195,8 @@ def restart(variant: Variant) -> dict:
         if name.startswith("PRIVACY_FILTER_"):
             del env[name]
     env.update(variant.env)
-    env["PRIVACY_FILTER_MAX_TOKENS"] = WINDOW_TOKENS
+    if variant.max_tokens is not None:
+        env["PRIVACY_FILTER_MAX_TOKENS"] = variant.max_tokens
     result = subprocess.run(
         [str(ROOT / "privacy-filter-service"), "restart", "--force"],
         env=env,

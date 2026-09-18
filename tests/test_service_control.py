@@ -491,6 +491,19 @@ esac
         )
         self.assertNotIn("nvidia.com/gpu=all", arguments)
 
+    def test_gliner2_cpu_forwards_its_device_and_threshold_without_a_gpu(self):
+        _, arguments = self.launch(
+            7000,
+            PRIVACY_FILTER_BACKEND="gliner2",
+            PRIVACY_FILTER_GLINER2_DEVICE="cpu",
+            PRIVACY_FILTER_GLINER2_THRESHOLD="0.35",
+        )
+        self.assertIn("PRIVACY_FILTER_BACKEND=gliner2", arguments)
+        self.assertIn("PRIVACY_FILTER_GLINER2_DEVICE=cpu", arguments)
+        self.assertIn("PRIVACY_FILTER_GLINER2_THRESHOLD=0.35", arguments)
+        self.assertNotIn("nvidia.com/gpu=all", arguments)
+        self.assertEqual(arguments[-1], "localhost/privacy-filter-local:gliner2")
+
 
 class HealthTest(unittest.TestCase):
     def test_unreachable_service_reports_none(self):

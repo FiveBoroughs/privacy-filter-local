@@ -1,6 +1,6 @@
 # privacy-filter-local
 
-Run OpenAI's [`openai/privacy-filter`](https://huggingface.co/openai/privacy-filter) model locally, on an NVIDIA GPU with torch or on the CPU with ONNX Runtime, to find or redact personal data before text leaves your machine. It can also block git commits that would record it.
+Run PII models locally through torch, ONNX Runtime or GLiNER2 to find or redact personal data before text leaves your machine. The default is OpenAI's [`openai/privacy-filter`](https://huggingface.co/openai/privacy-filter); the multilingual GLiNER2 backend is optional. The same service can block git commits that would record detected data.
 
 Nothing is sent anywhere. The model runs in a Podman container bound to `127.0.0.1`, and the CLI, the service and the git hook all fail closed: if something cannot be scanned, they say so and stop.
 
@@ -10,6 +10,7 @@ Nothing is sent anywhere. The model runs in a Podman container bound to `127.0.0
 - Python 3.11+ on the host for the CLI and hook. Standard library only.
 - For the default torch backend: an NVIDIA GPU with roughly 3 GB free VRAM, plus the NVIDIA container toolkit / CDI. Startup refuses below that threshold.
 - For the ONNX backend: an NVIDIA GPU is optional. `auto` uses CUDA when the device/toolkit is present and otherwise falls back to CPU; `cpu` forces CPU-only operation.
+- For the GLiNER2 backend: an NVIDIA GPU is optional. `auto` uses CUDA when available and otherwise runs on CPU.
 
 The default container loads the torch checkpoint in its native bfloat16, ~2.8 GB. Left alone, transformers upcasts to fp32 and doubles that, which will not share a 10 GB card with a game. ONNX defaults to the 1.5 GB int8 export: it matched fp16 ONNX on the synthetic comparison corpus and is safe on both CUDA and CPU. The smaller q4f16 export changed findings on CPU and returned incomplete findings through CUDA on the tested RTX 3080, so CUDA refuses q4 exports.
 
@@ -38,6 +39,12 @@ PRIVACY_FILTER_BACKEND=onnx PRIVACY_FILTER_ONNX_PROVIDER=cpu \
   ./privacy-filter-service ensure
 ```
 
+Multilingual GLiNER2 with CUDA preferred and CPU fallback:
+
+```bash
+PRIVACY_FILTER_BACKEND=gliner2 ./privacy-filter-service restart
+```
+
 Use `restart`, not `ensure`, when changing the backend of an already healthy service: `ensure` deliberately reuses anything healthy rather than replacing an in-flight scanner.
 
 `check` exits `1` when it finds something, `0` when it does not. A cold torch start is about 6-10 seconds. There is no keep-warm mode by default: pinning 2.8 GB of VRAM to save six seconds is a bad trade.
@@ -48,12 +55,17 @@ Use `restart`, not `ensure`, when changing the backend of an already healthy ser
 | --- | --- | --- | --- | --- |
 | torch | `PRIVACY_FILTER_BACKEND=torch` (default) | NVIDIA CUDA | bf16 checkpoint, ~2.8 GB | 6.28 GB |
 | ONNX | `PRIVACY_FILTER_BACKEND=onnx` | CUDA preferred, CPU fallback | `onnx/model_quantized.onnx`, int8, ~1.5 GB | 1.51 GB |
+| GLiNER2 | `PRIVACY_FILTER_BACKEND=gliner2` | CUDA preferred, CPU fallback | `fastino/gliner2-privacy-filter-PII-multi`, fp16 on CUDA | 6.29 GB |
 
 `PRIVACY_FILTER_ONNX_PROVIDER` accepts `auto` (default), `cuda` or `cpu`. `cuda` refuses to start when CUDAExecutionProvider cannot load; it never falls back silently. `auto` maps an NVIDIA device when available and otherwise starts with CPUExecutionProvider.
 
 On a cold ONNX CUDA start, when `PRIVACY_FILTER_MAX_TOKENS` is unset, the launcher measures free VRAM and selects the largest measured budget with roughly 0.75 GiB of headroom: 4096 tokens at 6 GiB free, 2048 at 3 GiB, 1024 at 1.5 GiB, and 256 below that. The per-request OOM ladder still adapts if availability changes later. An explicit `PRIVACY_FILTER_MAX_TOKENS` always overrides startup selection.
 
 Choose another published export with `PRIVACY_FILTER_ONNX_FILE`, for example `onnx/model_fp16.onnx`. The graph and all of its external data files are downloaded together. q4/q4f16 may be selected only with the CPU provider: CUDA startup refuses them because ONNX Runtime 1.30 returned incomplete findings on the tested RTX 3080. `privacy-filter health` reports the live `backend`, `provider`, `model_file` and `dtype`.
+
+`PRIVACY_FILTER_GLINER2_DEVICE` accepts `auto` (default), `cuda` or `cpu`; `PRIVACY_FILTER_GLINER2_THRESHOLD` defaults to `0.5`. The model emits 42 fine-grained labels, which the adapter maps into the service's stable eight-label vocabulary so hook allowlists and redaction markers do not change with the backend. It uses real half-open character spans returned by GLiNER2 and refuses missing, inconsistent or duplicate offsets rather than recreating positions with `text.find`.
+
+GLiNER2's encoder accepts 512 total tokens. Its 42-label schema occupies 186 encoded tokens on the pinned runtime, so the service reserves those tokens plus its safety margin and reports a 310-token text budget. Setting `PRIVACY_FILTER_MAX_TOKENS` above the model limit is still a startup error.
 
 ### Benchmarks
 
@@ -72,6 +84,7 @@ RTX 3080 / i5-12600KF; 47 synthetic texts (22 hard, 13 clean), 70 annotated span
 
 | Variant | Strict F1 | Partial F1 | Direct ER | Quasi ER | Hard F1 | Clean false findings |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `gliner2-cuda-fp16` | 0.82 | 0.84 | 87% | 93% | 0.87 | 8 |
 | `onnx-cuda-fp16` | 0.71 | 0.78 | 83% | 86% | 0.62 | 4 |
 | `onnx-cpu-fp16` | 0.71 | 0.78 | 83% | 86% | 0.63 | 4 |
 | `onnx-cuda-int8` | 0.70 | 0.77 | 83% | 86% | 0.61 | 4 |
@@ -82,6 +95,7 @@ RTX 3080 / i5-12600KF; 47 synthetic texts (22 hard, 13 clean), 70 annotated span
 
 | Variant | Corpus scan | GPU resident |
 | --- | ---: | ---: |
+| `gliner2-cuda-fp16` | 0.55s (11.7 ms/text) | 1,884 MiB |
 | `onnx-cuda-fp16` | 0.18s (3.8 ms/text) | 4,348 MiB |
 | `onnx-cuda-int8` | 7.72s (164 ms/text) | 504 MiB |
 | `torch-cuda-bf16` | 5.02s (107 ms/text) | 2,968 MiB |
@@ -92,11 +106,13 @@ RTX 3080 / i5-12600KF; 47 synthetic texts (22 hard, 13 clean), 70 annotated span
 
 The default model's scores stay close, but its exports do not return identical findings: int8 differed from CPU fp16 on 4/47 texts, q4f16 on 7/47, native torch on 5/47, and CUDA fp16 on only 1/47. q4f16 also added two false person findings to a clean issue description. The hard tier separates from the full corpus (`0.60–0.63` versus `0.70–0.71` strict F1).
 
-The runtime trade-off is large. CUDA fp16 is about 43 times faster than CUDA int8 on these short requests, but holds 4.35 GiB versus 504 MiB. CPU fp16 is about 2.4 times faster than CPU int8 on this machine. The int8 default is therefore the low-VRAM choice, not the fastest one.
+GLiNER2 is materially stronger on this corpus: 0.82 strict F1, 87% direct-identifier entity recall, 93% quasi-identifier entity recall and 0.87 hard-tier F1. Its normalized findings differed from the CPU fp16 baseline on 27/47 texts. The trade-off is more noise: eight false findings across three of 13 clean records, versus three to five for the default-model variants. It also missed both annotated private URLs. This makes it a useful multilingual alternative, not evidence to change the default.
 
-More importantly, 83% direct-identifier entity recall is not a passing grade. The corpus exposed incomplete masking of two hyphenated role-email addresses, unusual phone formats, a repeated name, a spelled-out email and several secret formats. Nemotron's finer 55-label taxonomy did worse here even after canonical label mapping and adjacent-span merging: 71% direct-identifier entity recall, 14 false findings in 13 clean texts, and findings that differed from fp16 on 33/47 records.
+The runtime trade-off is large. GLiNER2 scanned the short-text corpus in 0.55 seconds while holding 1.88 GiB, between CUDA fp16's 0.18 seconds / 4.35 GiB and CUDA int8's 7.72 seconds / 504 MiB. CPU fp16 is about 2.4 times faster than CPU int8 on this machine. The ONNX int8 default is therefore the low-VRAM choice, not the fastest one.
 
-This is a small synthetic regression benchmark, not an estimate of production accuracy. GPU residency is the peak on these short records; full 4096-token windows use more.
+More importantly, 83% direct-identifier entity recall from the default model is not a passing grade, and GLiNER2's 87% is still incomplete. The corpus exposed incomplete masking of two hyphenated role-email addresses, unusual phone formats, a repeated name, a spelled-out email and several secret formats in the default model. Nemotron's finer 55-label taxonomy did worse even after canonical label mapping and adjacent-span merging: 71% direct-identifier entity recall, 14 false findings in 13 clean texts, and findings that differed from fp16 on 33/47 records.
+
+This is a small synthetic regression benchmark, not an estimate of production accuracy. GPU residency is the peak on these short records; full model-sized windows use more.
 
 Methodology references: [nervaluate's entity-level MUC/SemEval scoring](https://github.com/MantisAI/nervaluate), [Presidio's character-span evaluation](https://presidio-research.dataprivacystack.org/span_evaluation/), and [the Text Anonymization Benchmark](https://aclanthology.org/2022.cl-4.19/).
 
@@ -123,7 +139,7 @@ Submit whole files. The service tokenizes, splits the input into overlapping win
 - If even the minimum does not fit, the request fails with HTTP 503 and returns no partial findings.
 - Duplicate findings from overlapping windows are coalesced, and offsets always refer to the original text.
 
-Tuning knobs: `PRIVACY_FILTER_MAX_TOKENS` (4096 unless ONNX CUDA selects a smaller cold-start budget), `PRIVACY_FILTER_MIN_TOKENS` (256), `PRIVACY_FILTER_TOKEN_SHRINK_FACTOR` (0.5), `PRIVACY_FILTER_CHUNK_OVERLAP_TOKENS` (64), `PRIVACY_FILTER_TIMEOUT` (900). `privacy-filter health` reports the live values.
+Tuning knobs: `PRIVACY_FILTER_MAX_TOKENS` (4096 unless a backend derives a smaller safe budget), `PRIVACY_FILTER_MIN_TOKENS` (256), `PRIVACY_FILTER_TOKEN_SHRINK_FACTOR` (0.5), `PRIVACY_FILTER_CHUNK_OVERLAP_TOKENS` (64), `PRIVACY_FILTER_TIMEOUT` (900). `privacy-filter health` reports the live values.
 
 Smaller windows are much slower, because the cost is per forward pass rather than per token. Lower the maximum only as far as your GPU needs.
 
@@ -169,6 +185,7 @@ The suite runs on a plain interpreter with no GPU, torch, ONNX Runtime or FastAP
 | `scripts/adaptive_scan.py` | Budget ladder, OOM retries, dedup, redaction (pure) |
 | `scripts/token_classification.py` | Transformers-compatible BIO grouping (pure) |
 | `scripts/onnx_backend.py` | Raw ONNX Runtime classifier and fast-tokenizer adapter |
+| `scripts/gliner2_backend.py` | GLiNER2 adapter, label mapping and offset validation |
 | `scripts/privacy_filter_service.py` | FastAPI service; runs inside the container |
 | `scripts/privacy_filter_client.py` | CLI |
 | `scripts/service_control.py` | Container lifecycle, locking, leases |
