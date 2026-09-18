@@ -99,7 +99,10 @@ class FakeTokenizer:
 class FakeClassifier:
     def __init__(self, behaviour=None):
         self.tokenizer = FakeTokenizer()
-        self.model = types.SimpleNamespace(dtype="torch.bfloat16")
+        self.model = types.SimpleNamespace(
+            dtype="torch.bfloat16",
+            config=types.SimpleNamespace(max_position_embeddings=131072),
+        )
         self.behaviour = behaviour or (lambda chunk: [])
 
     def __call__(self, chunk):
@@ -129,6 +132,23 @@ class ServiceTestCase(unittest.TestCase):
             oom_errors=service.oom_error_types(),
             on_oom=service.torch.cuda.empty_cache,
         )
+
+    def stub_pipeline(self, classifier):
+        """Make load_classifier() return this classifier instead of loading one."""
+        original = service.pipeline
+        service.pipeline = lambda **_: classifier
+        self.addCleanup(setattr, service, "pipeline", original)
+
+    def configure_max_tokens(self, value):
+        """Stand in for the operator having set PRIVACY_FILTER_MAX_TOKENS."""
+        for name, setting in (("MAX_TOKENS", value), ("MAX_TOKENS_CONFIGURED", True)):
+            self.addCleanup(setattr, service, name, getattr(service, name))
+            setattr(service, name, setting)
+
+    def configure_context_limit(self, value):
+        """Stand in for the operator having set PRIVACY_FILTER_CONTEXT_LIMIT."""
+        self.addCleanup(setattr, service, "CONTEXT_LIMIT", service.CONTEXT_LIMIT)
+        service.CONTEXT_LIMIT = value
 
 
 class ScanErrorTest(ServiceTestCase):
@@ -225,6 +245,7 @@ class HealthTest(ServiceTestCase):
         self.assertTrue(health["ok"])
         self.assertTrue(health["cuda_available"])
         self.assertEqual(health["max_tokens"], 20)
+        self.assertEqual(health["context_limit"], 131072)
         self.assertEqual(health["min_tokens"], 5)
         self.assertEqual(health["overlap_tokens"], 4)
         self.assertEqual(health["token_budgets"], [20, 10, 5])
@@ -237,23 +258,67 @@ class HealthTest(ServiceTestCase):
 
 
 class BudgetWiringTest(ServiceTestCase):
-    def test_max_budget_respects_the_tokenizer_context(self):
+    def test_a_model_shorter_than_our_default_budget_clamps_it(self):
         service.state.classifier = FakeClassifier()
         service.state.classifier.tokenizer.model_max_length = 512
-        # 512 - 2 special - 16 margin = 494, below the configured maximum.
+        # 512 - 2 special - 16 margin = 494. Our own 4096 default is sized for
+        # the GPU, not for this model, so it gives way rather than refusing.
         self.assertEqual(service.max_token_budget(), 494)
 
     def test_max_budget_respects_the_configured_cap(self):
         service.state.classifier = FakeClassifier()
         self.assertEqual(service.max_token_budget(), service.MAX_TOKENS)
 
-    def test_nonsense_tokenizer_length_falls_back(self):
+    def test_nonsense_tokenizer_length_does_not_lower_the_budget(self):
         service.state.classifier = FakeClassifier()
         service.state.classifier.tokenizer.model_max_length = 10**30
-        self.assertEqual(
-            service.max_token_budget(),
-            min(service.FALLBACK_MAX_TOKENS - 18, service.MAX_TOKENS),
-        )
+        self.assertEqual(service.max_token_budget(), service.MAX_TOKENS)
+
+    def test_a_model_shorter_than_an_explicit_budget_refuses_to_start(self):
+        self.configure_max_tokens(4096)
+        classifier = FakeClassifier()
+        classifier.model.config.max_position_embeddings = 512
+        self.stub_pipeline(classifier)
+        with self.assertRaises(RuntimeError) as ctx:
+            service.load_classifier()
+        message = str(ctx.exception)
+        self.assertIn("PRIVACY_FILTER_MAX_TOKENS", message)
+        self.assertIn("512", message)
+        self.assertIsNone(service.state.scanner)
+
+    def test_a_model_declaring_no_limit_refuses_to_start(self):
+        classifier = FakeClassifier()
+        classifier.model.config = types.SimpleNamespace()
+        self.stub_pipeline(classifier)
+        with self.assertRaises(RuntimeError) as ctx:
+            service.load_classifier()
+        self.assertIn("PRIVACY_FILTER_CONTEXT_LIMIT", str(ctx.exception))
+        self.assertIsNone(service.state.scanner)
+
+    def test_a_declared_limit_starts_a_model_whose_config_declares_none(self):
+        self.configure_context_limit("768")
+        classifier = FakeClassifier()
+        classifier.model.config = types.SimpleNamespace()
+        self.stub_pipeline(classifier)
+        service.load_classifier()
+        self.assertEqual(service.state.scanner.policy.max_tokens, 750)
+
+    def test_a_bad_declared_limit_refuses_to_start_naming_the_variable(self):
+        # Unparseable and out-of-range are the same mistake to the operator, and
+        # neither may quietly become a guessed budget.
+        for value in ("lots", "0", "10000000000"):
+            with self.subTest(value=value):
+                self.configure_context_limit(value)
+                self.stub_pipeline(FakeClassifier())
+                with self.assertRaises(RuntimeError) as ctx:
+                    service.load_classifier()
+                self.assertIn("PRIVACY_FILTER_CONTEXT_LIMIT", str(ctx.exception))
+                self.assertIsNone(service.state.scanner)
+
+    def test_a_model_that_fits_loads_at_the_configured_budget(self):
+        self.stub_pipeline(FakeClassifier())
+        service.load_classifier()
+        self.assertEqual(service.state.scanner.policy.max_tokens, service.MAX_TOKENS)
 
     def test_slow_tokenizer_falls_back_to_character_offsets(self):
         service.state.classifier = FakeClassifier()

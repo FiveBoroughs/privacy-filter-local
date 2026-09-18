@@ -22,12 +22,17 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 from adaptive_scan import (  # noqa: E402
     AdaptiveScanner,
+    BudgetExceedsContextLimit,
     BudgetPolicy,
+    ContextLimitError,
+    ContextLimitUnknown,
     Finding,
     ScanBudgetExhausted,
     findings_from_raw,
     merge_findings,
     redact_text,
+    resolve_context_limit,
+    window_budget,
 )
 from text_chunking import plan_chunks  # noqa: E402
 
@@ -360,6 +365,49 @@ class FindingsFromRawTest(unittest.TestCase):
 
     def test_findings_without_offsets_are_dropped(self):
         self.assertEqual(findings_from_raw("Ada", 0, [{"entity": "X", "score": 0.9}]), [])
+
+
+class Config:
+    """A model config with attribute access, as transformers ships them."""
+
+    def __init__(self, **values):
+        self.__dict__.update(values)
+
+
+class ContextLimitTest(unittest.TestCase):
+    def test_config_limit_wins_over_a_tokenizer_advertising_more(self):
+        # pplx-pii-masking: advertises 131072, truncates at 4096.
+        config = Config(max_seq_len=4096, max_position_embeddings=131072)
+        self.assertEqual(resolve_context_limit(config, 131072), 4096)
+
+    def test_nested_encoder_limit_is_found(self):
+        # gliner2: mdeberta encoder one level down, tokenizer says 1e30.
+        config = Config(encoder_config={"max_position_embeddings": 512})
+        self.assertEqual(resolve_context_limit(config, 10**30), 512)
+
+    def test_tokenizer_may_lower_the_limit_but_never_establish_it(self):
+        # openai/privacy-filter: 131072 architecture, 128000 advertised.
+        config = Config(max_position_embeddings=131072)
+        self.assertEqual(resolve_context_limit(config, 128000), 128000)
+        with self.assertRaises(ContextLimitUnknown):
+            resolve_context_limit(Config(), 128000)
+
+    def test_a_declared_limit_overrides_an_unreadable_config(self):
+        self.assertEqual(resolve_context_limit(Config(), None, declared=768), 768)
+        with self.assertRaises(ContextLimitError):
+            resolve_context_limit(Config(), None, declared=0)
+
+    def test_an_explicit_budget_above_the_limit_is_refused(self):
+        with self.assertRaises(BudgetExceedsContextLimit) as ctx:
+            window_budget(8192, 512, explicit=True)
+        self.assertEqual((ctx.exception.requested, ctx.exception.limit), (8192, 512))
+
+    def test_a_default_budget_above_the_limit_is_clamped_to_it(self):
+        self.assertEqual(window_budget(8192, 512, special_tokens=2, margin=16), 494)
+
+    def test_a_budget_within_the_limit_keeps_headroom(self):
+        self.assertEqual(window_budget(4096, 4096, special_tokens=2, margin=16), 4078)
+        self.assertEqual(window_budget(1024, 4096, special_tokens=2, margin=16), 1024)
 
 
 if __name__ == "__main__":

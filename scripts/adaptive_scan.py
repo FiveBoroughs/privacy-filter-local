@@ -16,7 +16,7 @@ with no torch, no transformers and no GPU. The service wires the real ones in.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -40,6 +40,137 @@ class ScanBudgetExhausted(RuntimeError):
     def __init__(self, budget: int) -> None:
         super().__init__(f"out of memory at the minimum token budget ({budget} tokens)")
         self.budget = budget
+
+
+# Context-length keys, most specific first. `max_seq_len` is what a model that
+# truncates below its positional capacity declares, `max_position_embeddings` is
+# the architecture's own ceiling, and `n_positions` is the GPT-2-era spelling.
+CONTEXT_LIMIT_KEYS = ("max_seq_len", "max_position_embeddings", "n_positions")
+# Composite configs keep the encoder that actually sees our tokens one level
+# down, and that encoder's limit is the one that truncates.
+NESTED_CONFIG_KEYS = ("encoder_config", "text_config", "backbone_config")
+# Above this a declared length is a sentinel rather than a context window:
+# tokenizers ship values like 1e30 to mean "unset", and honouring one builds
+# windows no model accepts.
+IMPLAUSIBLE_CONTEXT_LIMIT = 1_000_000
+
+
+class ContextLimitError(RuntimeError):
+    """No window size can be shown to fit the model, so nothing may be scanned.
+
+    A window larger than the model accepts is truncated silently: the forward
+    pass succeeds, the findings past the cut never exist, and the scan reports
+    success. There is no safe default to fall back on, so this is fatal at
+    startup rather than recoverable per request.
+    """
+
+
+class ContextLimitUnknown(ContextLimitError):
+    def __init__(self) -> None:
+        super().__init__(
+            "the model config declares no context length "
+            f"({', '.join(CONTEXT_LIMIT_KEYS)})"
+        )
+
+
+class BudgetExceedsContextLimit(ContextLimitError):
+    def __init__(self, requested: int, limit: int) -> None:
+        super().__init__(
+            f"a window budget of {requested} tokens exceeds the model's "
+            f"context limit of {limit}"
+        )
+        self.requested = requested
+        self.limit = limit
+
+
+def config_value(config: Any, key: str) -> Any:
+    """Read one key from a config, which may be a mapping or an object."""
+    if config is None:
+        return None
+    if isinstance(config, Mapping):
+        return config.get(key)
+    return getattr(config, key, None)
+
+
+def plausible_limit(value: Any) -> int | None:
+    """A declared context length we are willing to act on, or None."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if value < 1 or value > IMPLAUSIBLE_CONTEXT_LIMIT:
+        return None
+    return value
+
+
+def declared_context_limits(config: Any) -> list[int]:
+    """Every plausible context length this config and its sub-configs declare."""
+    limits = []
+    for key in CONTEXT_LIMIT_KEYS:
+        limit = plausible_limit(config_value(config, key))
+        if limit is not None:
+            limits.append(limit)
+    for key in NESTED_CONFIG_KEYS:
+        nested = config_value(config, key)
+        if nested is not None and nested is not config:
+            limits.extend(declared_context_limits(nested))
+    return limits
+
+
+def resolve_context_limit(
+    config: Any,
+    tokenizer_max_length: Any = None,
+    declared: Any = None,
+) -> int:
+    """Largest window the model itself accepts, in tokens.
+
+    The model config is the authority. A tokenizer's ``model_max_length`` may
+    only lower the result, never establish or raise it: the tokenizer does not
+    know what the architecture accepts, and several ship a number far above it
+    (131072 against a real 4096, or 1e30 against a real 512). ``declared`` is an
+    operator's explicit statement of the limit and wins outright, because it
+    exists to correct a config we cannot read.
+
+    Raises ``ContextLimitUnknown`` when nothing declares a limit. Guessing one
+    is the failure this function exists to prevent.
+    """
+    if declared is not None:
+        limit = plausible_limit(declared)
+        if limit is None:
+            raise ContextLimitError(
+                f"a declared context limit must be an integer between 1 and "
+                f"{IMPLAUSIBLE_CONTEXT_LIMIT}, got {declared!r}"
+            )
+        return limit
+    limits = declared_context_limits(config)
+    if not limits:
+        raise ContextLimitUnknown()
+    tokenizer_limit = plausible_limit(tokenizer_max_length)
+    if tokenizer_limit is not None:
+        limits.append(tokenizer_limit)
+    return min(limits)
+
+
+def window_budget(
+    requested: int,
+    context_limit: int,
+    special_tokens: int = 0,
+    margin: int = 0,
+    explicit: bool = False,
+) -> int:
+    """The window size to use, in tokens.
+
+    Never above ``context_limit``: a larger window is truncated silently and
+    every finding past the cut is lost. Clamping down is always safe, so a
+    budget we chose ourselves (a default sized for VRAM, not for this model) is
+    simply clamped. A budget the operator set explicitly is an error instead,
+    because a clamp there is us ignoring an instruction and them believing a
+    number that is not in force. Within the limit, headroom for special tokens
+    and tokenization drift comes off the top.
+    """
+    if requested > context_limit:
+        if explicit:
+            raise BudgetExceedsContextLimit(requested, context_limit)
+        requested = context_limit
+    return max(1, min(requested, context_limit - special_tokens - margin))
 
 
 @dataclass(frozen=True)

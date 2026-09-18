@@ -53,6 +53,8 @@ Tuning knobs: `PRIVACY_FILTER_MAX_TOKENS` (4096), `PRIVACY_FILTER_MIN_TOKENS` (2
 
 Smaller windows are much slower, because the cost is per forward pass rather than per token. Lower the maximum only as far as your GPU needs.
 
+No window is ever larger than the model's own maximum sequence length, which the service reads from the model config at startup and reports as `context_limit`. A larger window would be truncated silently and every finding past the cut would be lost, so the default budget gives way to a shorter-context model, while a `PRIVACY_FILTER_MAX_TOKENS` you set above what the model accepts is a startup error naming both numbers rather than a silent clamp. A model whose config declares no sequence length at all refuses to start: set `PRIVACY_FILTER_CONTEXT_LIMIT` to its real maximum. The tokenizer's own `model_max_length` can only lower the limit, never establish it — several models advertise far more there than the architecture accepts.
+
 ## Git hook
 
 ```bash

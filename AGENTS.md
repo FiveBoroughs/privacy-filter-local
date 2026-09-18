@@ -52,7 +52,7 @@ Do not re-derive these; they were measured on an RTX 3080 sharing the GPU with a
 
 ## Traps
 
-The tokenizer does not know the model's real context limit. `max_token_budget()` reads `tokenizer.model_max_length`, which some models set far above what the architecture accepts, and the fallback for absurd values is a fixed 4096 that can also be too large. A window bigger than the model accepts is truncated silently, and findings past the cut vanish from a scan that reports success. See issues #3 and #4 before adding a model.
+The tokenizer does not know the model's real context limit. `resolve_context_limit` in `adaptive_scan.py` takes it from the model config (`max_seq_len`, `max_position_embeddings`, `n_positions`, including nested encoder configs, smallest wins); `tokenizer.model_max_length` may only lower that, never establish it. A window bigger than the model accepts is truncated silently and findings past the cut vanish from a scan that reports success, so a model that declares no limit refuses to start rather than falling back to a guess. Adding a backend means declaring its real limit there — not widening the guard.
 
 Offsets are always original-text coordinates. Windows overlap, spans get re-planned at smaller budgets on OOM, and findings are merged across windows. Everything downstream, including `location_for` in the hook and `redact_text`, depends on offsets referring to the text the caller submitted.
 

@@ -34,7 +34,7 @@ mkdir -p "$ROOT/cache"
 env_args=()
 for name in PRIVACY_FILTER_MAX_TOKENS PRIVACY_FILTER_MIN_TOKENS \
             PRIVACY_FILTER_TOKEN_SHRINK_FACTOR PRIVACY_FILTER_CHUNK_OVERLAP_TOKENS \
-            PRIVACY_FILTER_MODEL; do
+            PRIVACY_FILTER_CONTEXT_LIMIT PRIVACY_FILTER_MODEL; do
   if [ -n "${!name:-}" ]; then
     env_args+=(--env "${name}=${!name}")
     echo "Passing ${name}=${!name} to the service"

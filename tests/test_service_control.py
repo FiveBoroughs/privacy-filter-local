@@ -112,11 +112,62 @@ class EnsureTest(unittest.TestCase):
 
     def test_never_ready_times_out_with_its_own_code(self):
         with mock.patch.object(control, "state", return_value=control.STATE_DOWN), \
+                mock.patch.object(control, "container_failure", return_value=None), \
                 mock.patch.object(control, "run_script"), \
                 mock.patch.object(control.time, "sleep"):
             with self.assertRaises(control.LifecycleError) as ctx:
                 control.ensure(timeout=0.01)
         self.assertEqual(ctx.exception.code, control.EXIT_TIMED_OUT)
+
+    def test_a_container_that_died_at_startup_reports_why_immediately(self):
+        # Without this the caller waits out the full readiness timeout and is
+        # told "did not become ready", burying the refusal the service printed.
+        refusal = (
+            "PRIVACY_FILTER_MAX_TOKENS is 200000, but the model accepts at most 128000"
+        )
+        with mock.patch.object(control, "state", return_value=control.STATE_DOWN), \
+                mock.patch.object(control, "container_failure", return_value=refusal), \
+                mock.patch.object(control, "run_script"), \
+                mock.patch.object(control.time, "sleep") as sleep:
+            with self.assertRaises(control.LifecycleError) as ctx:
+                control.ensure(timeout=180)
+        self.assertEqual(ctx.exception.code, control.EXIT_START_FAILED)
+        self.assertIn(refusal, str(ctx.exception))
+        sleep.assert_not_called()
+
+
+class ContainerFailureTest(unittest.TestCase):
+    def run_with_logs(self, logs):
+        completed = subprocess.CompletedProcess([], 0, stdout=logs.encode())
+        with mock.patch.object(control, "container_running", return_value=False), \
+                mock.patch.object(control.subprocess, "run", return_value=completed):
+            return control.container_failure()
+
+    def test_the_last_exception_line_is_what_is_reported(self):
+        logs = (
+            "  File \"/app/adaptive_scan.py\", line 171, in window_budget\n"
+            "adaptive_scan.BudgetExceedsContextLimit: 200000 exceeds 128000\n"
+            "\n"
+            "Traceback (most recent call last):\n"
+            "RuntimeError: lower PRIVACY_FILTER_MAX_TOKENS to 128000 or below.\n"
+            "ERROR:    Application startup failed. Exiting.\n"
+        )
+        self.assertEqual(
+            self.run_with_logs(logs),
+            "lower PRIVACY_FILTER_MAX_TOKENS to 128000 or below.",
+        )
+
+    def test_a_container_that_logged_no_exception_reports_nothing(self):
+        self.assertIsNone(self.run_with_logs("INFO:     Started server process\n"))
+
+    def test_a_running_container_is_never_called_a_failure(self):
+        with mock.patch.object(control, "container_running", return_value=True):
+            self.assertIsNone(control.container_failure())
+
+    def test_no_podman_is_not_a_crash(self):
+        with mock.patch.object(control, "container_running", return_value=False), \
+                mock.patch.object(control.subprocess, "run", side_effect=FileNotFoundError):
+            self.assertIsNone(control.container_failure())
 
     def test_failed_start_script_surfaces_its_exit_code(self):
         with mock.patch.object(control, "state", return_value=control.STATE_DOWN), \

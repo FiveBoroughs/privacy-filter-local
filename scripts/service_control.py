@@ -31,6 +31,7 @@ import argparse
 import errno
 import fcntl
 import os
+import re
 import subprocess
 import sys
 import time
@@ -256,6 +257,38 @@ def container_running() -> bool:
     return bool(result.stdout.strip())
 
 
+# Python's final traceback line -- "adaptive_scan.BudgetExceedsContextLimit: ..."
+# or "RuntimeError: ..." -- carries the refusal the service wants read. Matching
+# only that keeps this from being a blind log dump.
+FATAL_LINE = re.compile(r"^(?:\w+\.)*\w*(?:Error|Exception):\s*(\S.*)$")
+
+
+def container_failure() -> str | None:
+    """Why a stopped container died, or None while it is still running.
+
+    A service that refuses to start (a budget above the model's context limit,
+    no CUDA device) exits immediately, and waiting out the readiness timeout
+    would replace a precise, actionable message with "did not become ready".
+    """
+    if container_running():
+        return None
+    try:
+        result = subprocess.run(
+            ["podman", "logs", "--tail", "40", CONTAINER],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    except OSError:
+        return None
+    reason = None
+    for line in result.stdout.decode("utf-8", "replace").splitlines():
+        match = FATAL_LINE.match(line)
+        if match:
+            reason = match.group(1)
+    return reason
+
+
 def run_script(script: str, action: str) -> None:
     # Progress chatter (cached build steps, container ids) goes to stderr so it
     # never pollutes a caller parsing stdout, and is dropped entirely in quiet
@@ -283,6 +316,12 @@ def wait_until_ready(timeout: float) -> None:
             raise LifecycleError(
                 EXIT_NO_GPU, "Privacy Filter started but reports no CUDA device"
             )
+        if current == STATE_DOWN:
+            failure = container_failure()
+            if failure is not None:
+                raise LifecycleError(
+                    EXIT_START_FAILED, f"Privacy Filter exited at startup: {failure}"
+                )
         time.sleep(POLL_INTERVAL)
     raise LifecycleError(
         EXIT_TIMED_OUT, f"Privacy Filter did not become ready within {timeout:g}s"

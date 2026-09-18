@@ -96,16 +96,19 @@ The service starts at `PRIVACY_FILTER_MAX_TOKENS` per window. When a window does
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `PRIVACY_FILTER_MAX_TOKENS` | 4096 | Starting window size, capped by the tokenizer context |
+| `PRIVACY_FILTER_MAX_TOKENS` | 4096 | Starting window size, capped by the model's context limit |
 | `PRIVACY_FILTER_MIN_TOKENS` | 256 | Smallest window tried before giving up |
 | `PRIVACY_FILTER_TOKEN_SHRINK_FACTOR` | 0.5 | Backoff applied per retry |
 | `PRIVACY_FILTER_CHUNK_OVERLAP_TOKENS` | 64 | Tokens each window re-reads, so PII cannot hide in a cut |
 | `PRIVACY_FILTER_TIMEOUT` | 900 | Client-side seconds to wait for a scan |
 | `PRIVACY_FILTER_HEALTH_TIMEOUT` | 30 | Client-side seconds to wait for `health` |
+| `PRIVACY_FILTER_CONTEXT_LIMIT` | from model config | The model's real maximum sequence length, for a model whose config does not declare one |
 
 A timeout (exit 7) is reported separately from an unreachable service (exit 3): a slow scan usually means the service is busy, not stopped, so restarting it is the wrong move. Very small window sizes make scans dramatically slower — one forward pass per window — so lower `PRIVACY_FILTER_MAX_TOKENS` only as far as the GPU actually needs.
 
 `privacy-filter health` reports these live, along with the retry ladder. GPU inference is serialized in-process, so two concurrent requests cannot allocate transient memory at the same time.
+
+Windows are never larger than the model's own maximum sequence length; `health` reports it as `context_limit`. A larger window would be truncated silently and findings past the cut would vanish from a scan that reported success, so the service refuses to start when `PRIVACY_FILTER_MAX_TOKENS` is set above it, or when the model declares no limit for `PRIVACY_FILTER_CONTEXT_LIMIT` to supply. Neither is a scan failure to work around: nothing has been scanned.
 
 ## Git pre-commit hook
 
