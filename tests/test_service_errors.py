@@ -225,6 +225,13 @@ class ScanErrorTest(ServiceTestCase):
         service.torch.cuda.is_available = lambda: False
         self.assertEqual(service.scan("hello"), [])
 
+    def test_pplx_scans_without_cuda(self):
+        self.configure_backend("pplx")
+        self.install(lambda chunk: [])
+        service.state.provider_name = "CPU"
+        service.torch.cuda.is_available = lambda: False
+        self.assertEqual(service.scan("hello"), [])
+
 
 class EndpointTest(ServiceTestCase):
     def behaviour(self, chunk):
@@ -393,6 +400,21 @@ class BudgetWiringTest(ServiceTestCase):
         self.assertIs(service.state.classifier, classifier)
         self.assertEqual(service.state.provider_name, "CPU")
         self.assertEqual(service.state.scanner.policy.max_tokens, 359)
+        self.assertEqual(service.oom_error_types(), (MemoryError,))
+
+    def test_pplx_loads_through_its_adapter_and_uses_config_limit(self):
+        self.configure_backend("pplx")
+        classifier = FakeClassifier()
+        classifier.provider = "CPU"
+        classifier.model.config = types.SimpleNamespace(max_seq_len=4096)
+        original = service.load_pplx_classifier
+        service.load_pplx_classifier = lambda: classifier
+        self.addCleanup(setattr, service, "load_pplx_classifier", original)
+        service.torch.cuda.is_available = lambda: False
+        service.load_classifier()
+        self.assertIs(service.state.classifier, classifier)
+        self.assertEqual(service.state.provider_name, "CPU")
+        self.assertEqual(service.context_limit(), 4096)
         self.assertEqual(service.oom_error_types(), (MemoryError,))
 
     def test_slow_tokenizer_falls_back_to_character_offsets(self):

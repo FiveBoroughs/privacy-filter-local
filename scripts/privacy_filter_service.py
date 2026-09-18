@@ -10,15 +10,15 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 BACKEND = os.environ.get("PRIVACY_FILTER_BACKEND", "torch").lower()
-SUPPORTED_BACKENDS = {"gliner2", "onnx", "torch"}
+SUPPORTED_BACKENDS = {"gliner2", "onnx", "pplx", "torch"}
 if BACKEND not in SUPPORTED_BACKENDS:
     choices = ", ".join(sorted(SUPPORTED_BACKENDS))
     raise RuntimeError(f"PRIVACY_FILTER_BACKEND must be one of: {choices}")
 
 # CPU ONNX images deliberately do not contain torch or transformers. Importing
 # heavy runtimes only for backends that use them keeps that image small and
-# GPU-independent. GLiNER2 imports its own compatible model stack lazily.
-if BACKEND in {"gliner2", "torch"}:
+# GPU-independent. GLiNER2 and PPLX import their compatible model stacks lazily.
+if BACKEND in {"gliner2", "pplx", "torch"}:
     import torch
 else:
     torch = None
@@ -47,12 +47,17 @@ from text_chunking import Span, plan_chunks
 
 DEFAULT_TORCH_MODEL = "openai/privacy-filter"
 DEFAULT_GLINER2_MODEL = "fastino/gliner2-privacy-filter-PII-multi"
-DEFAULT_MODEL = DEFAULT_GLINER2_MODEL if BACKEND == "gliner2" else DEFAULT_TORCH_MODEL
+DEFAULT_PPLX_MODEL = "perplexity-ai/pplx-pii-masking"
+DEFAULT_MODEL = {
+    "gliner2": DEFAULT_GLINER2_MODEL,
+    "pplx": DEFAULT_PPLX_MODEL,
+}.get(BACKEND, DEFAULT_TORCH_MODEL)
 DEFAULT_ONNX_FILE = "onnx/model_quantized.onnx"
 ONNX_FILE = os.environ.get("PRIVACY_FILTER_ONNX_FILE", DEFAULT_ONNX_FILE)
 ONNX_PROVIDER = os.environ.get("PRIVACY_FILTER_ONNX_PROVIDER", "auto").lower()
 GLINER2_DEVICE = os.environ.get("PRIVACY_FILTER_GLINER2_DEVICE", "auto").lower()
 GLINER2_THRESHOLD = float(os.environ.get("PRIVACY_FILTER_GLINER2_THRESHOLD", "0.5"))
+PPLX_DEVICE = os.environ.get("PRIVACY_FILTER_PPLX_DEVICE", "auto").lower()
 
 # Reserve a little headroom below the model's context limit for the special
 # tokens the pipeline adds, plus slack for any tokenization drift between our
@@ -128,6 +133,12 @@ def load_gliner2_classifier() -> Any:
     )
 
 
+def load_pplx_classifier() -> Any:
+    from pplx_backend import PplxClassifier
+
+    return PplxClassifier(state.model_name, device=PPLX_DEVICE)
+
+
 def load_classifier() -> None:
     if BACKEND == "torch":
         state.gpu_name = require_cuda()
@@ -144,6 +155,10 @@ def load_classifier() -> None:
         )
     elif BACKEND == "gliner2":
         state.classifier = load_gliner2_classifier()
+        state.gpu_name = state.classifier.gpu_name
+        state.provider_name = state.classifier.provider
+    elif BACKEND == "pplx":
+        state.classifier = load_pplx_classifier()
         state.gpu_name = state.classifier.gpu_name
         state.provider_name = state.classifier.provider
     else:
@@ -256,12 +271,14 @@ def classify_window(chunk: str) -> list[dict[str, Any]]:
 
 def oom_error_types() -> tuple[type[BaseException], ...]:
     """Memory errors worth retrying at a smaller window."""
-    if BACKEND == "onnx" or (BACKEND == "gliner2" and state.provider_name != "CUDA"):
+    if BACKEND == "onnx" or (
+        BACKEND in {"gliner2", "pplx"} and state.provider_name != "CUDA"
+    ):
         # ORT does not expose a distinct CPU OOM exception. A broad ORT error
         # can mean an invalid graph or input, and retrying that as if it were
         # memory pressure would hide the real failure. Native MemoryError is the
         # only unambiguous case; anything else propagates and callers fail closed.
-        # The same rule applies to GLiNER2 on CPU.
+        # The same rule applies to the PyTorch-backed classifiers on CPU.
         return (MemoryError,)
     types: list[type[BaseException]] = []
     for candidate in (

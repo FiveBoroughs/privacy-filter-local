@@ -103,3 +103,5 @@ bench/corpus.json	secret	f8b61af108b401d0
 tests/test_bench_scoring.py	private_person	e485e0a1508c7402
 tests/test_gliner2_backend.py	private_address	53ce71b808064504
 tests/test_gliner2_backend.py	private_person	52cfdbcc21092f7c
+scripts/pplx_model.py	private_person	2a4814e9fb1d22b5
+tests/test_pplx_backend.py	private_person	52cfdbcc21092f7c

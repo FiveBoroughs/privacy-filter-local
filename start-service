@@ -7,9 +7,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND="${PRIVACY_FILTER_BACKEND:-torch}"
 case "$BACKEND" in
-  gliner2|onnx|torch) ;;
+  gliner2|onnx|pplx|torch) ;;
   *)
-    echo "ERROR: PRIVACY_FILTER_BACKEND must be 'gliner2', 'onnx' or 'torch', got '$BACKEND'." >&2
+    echo "ERROR: PRIVACY_FILTER_BACKEND must be 'gliner2', 'onnx', 'pplx' or 'torch', got '$BACKEND'." >&2
     exit 1
     ;;
 esac
@@ -29,6 +29,14 @@ case "$GLINER2_DEVICE" in
     exit 1
     ;;
 esac
+PPLX_DEVICE="${PRIVACY_FILTER_PPLX_DEVICE:-auto}"
+case "$PPLX_DEVICE" in
+  auto|cpu|cuda) ;;
+  *)
+    echo "ERROR: PRIVACY_FILTER_PPLX_DEVICE must be 'auto', 'cpu' or 'cuda', got '$PPLX_DEVICE'." >&2
+    exit 1
+    ;;
+esac
 if [ "$BACKEND" = "onnx" ] \
    && [ "$ONNX_PROVIDER" = "cuda" ] \
    && ! command -v nvidia-smi >/dev/null 2>&1; then
@@ -41,11 +49,19 @@ if [ "$BACKEND" = "gliner2" ] \
   echo "ERROR: PRIVACY_FILTER_GLINER2_DEVICE=cuda, but nvidia-smi is unavailable." >&2
   exit 1
 fi
+if [ "$BACKEND" = "pplx" ] \
+   && [ "$PPLX_DEVICE" = "cuda" ] \
+   && ! command -v nvidia-smi >/dev/null 2>&1; then
+  echo "ERROR: PRIVACY_FILTER_PPLX_DEVICE=cuda, but nvidia-smi is unavailable." >&2
+  exit 1
+fi
 DEFAULT_TAG="gpu"
 if [ "$BACKEND" = "onnx" ]; then
   DEFAULT_TAG="onnx"
 elif [ "$BACKEND" = "gliner2" ]; then
   DEFAULT_TAG="gliner2"
+elif [ "$BACKEND" = "pplx" ]; then
+  DEFAULT_TAG="pplx"
 fi
 IMAGE="${PRIVACY_FILTER_IMAGE:-localhost/privacy-filter-local:${DEFAULT_TAG}}"
 CONTAINER="${PRIVACY_FILTER_CONTAINER:-privacy-filter-local}"
@@ -112,12 +128,18 @@ if [ "$BACKEND" = "onnx" ]; then
   env_args+=(--env "PRIVACY_FILTER_ONNX_PROVIDER=${ONNX_PROVIDER}")
 elif [ "$BACKEND" = "gliner2" ]; then
   env_args+=(--env "PRIVACY_FILTER_GLINER2_DEVICE=${GLINER2_DEVICE}")
+elif [ "$BACKEND" = "pplx" ]; then
+  env_args+=(--env "PRIVACY_FILTER_PPLX_DEVICE=${PPLX_DEVICE}")
 fi
 device_args=()
 if [ "$BACKEND" = "torch" ]; then
   device_args+=(--device nvidia.com/gpu=all)
 elif [ "$BACKEND" = "gliner2" ]; then
   if [ "$GLINER2_DEVICE" != "cpu" ] && command -v nvidia-smi >/dev/null 2>&1; then
+    device_args+=(--device nvidia.com/gpu=all)
+  fi
+elif [ "$BACKEND" = "pplx" ]; then
+  if [ "$PPLX_DEVICE" != "cpu" ] && command -v nvidia-smi >/dev/null 2>&1; then
     device_args+=(--device nvidia.com/gpu=all)
   fi
 elif [ "$ONNX_PROVIDER" != "cpu" ] && command -v nvidia-smi >/dev/null 2>&1; then

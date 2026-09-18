@@ -33,6 +33,9 @@ COPY scripts/adaptive_scan.py /app/adaptive_scan.py
 COPY scripts/token_classification.py /app/token_classification.py
 COPY scripts/onnx_backend.py /app/onnx_backend.py
 COPY scripts/gliner2_backend.py /app/gliner2_backend.py
+COPY scripts/pplx_model.py /app/pplx_model.py
+COPY scripts/pplx_model.LICENSE /app/pplx_model.LICENSE
+COPY scripts/pplx_backend.py /app/pplx_backend.py
 COPY scripts/privacy_filter_service.py /app/privacy_filter_service.py
 
 EXPOSE 8757

@@ -504,6 +504,17 @@ esac
         self.assertNotIn("nvidia.com/gpu=all", arguments)
         self.assertEqual(arguments[-1], "localhost/privacy-filter-local:gliner2")
 
+    def test_pplx_cpu_forwards_its_device_without_a_gpu(self):
+        _, arguments = self.launch(
+            7000,
+            PRIVACY_FILTER_BACKEND="pplx",
+            PRIVACY_FILTER_PPLX_DEVICE="cpu",
+        )
+        self.assertIn("PRIVACY_FILTER_BACKEND=pplx", arguments)
+        self.assertIn("PRIVACY_FILTER_PPLX_DEVICE=cpu", arguments)
+        self.assertNotIn("nvidia.com/gpu=all", arguments)
+        self.assertEqual(arguments[-1], "localhost/privacy-filter-local:pplx")
+
 
 class HealthTest(unittest.TestCase):
     def test_unreachable_service_reports_none(self):

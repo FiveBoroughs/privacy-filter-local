@@ -1,8 +1,8 @@
 # privacy-filter-local
 
-Run PII models locally through torch, ONNX Runtime or GLiNER2 to find or redact personal data before text leaves your machine. The default is OpenAI's [`openai/privacy-filter`](https://huggingface.co/openai/privacy-filter); the multilingual GLiNER2 backend is optional. The same service can block git commits that would record detected data.
+Run PII models locally through torch, ONNX Runtime, GLiNER2 or PPLX to find or redact personal data before text leaves your machine. The default is OpenAI's [`openai/privacy-filter`](https://huggingface.co/openai/privacy-filter); multilingual GLiNER2 and [`pplx-pii-masking`](https://huggingface.co/perplexity-ai/pplx-pii-masking) are optional. The same service can block git commits that would record detected data.
 
-Nothing is sent anywhere. The model runs in a Podman container bound to `127.0.0.1`, and the CLI, the service and the git hook all fail closed: if something cannot be scanned, they say so and stop.
+Scanned text is not sent anywhere. The model runs in a Podman container bound to `127.0.0.1`, and the CLI, the service and the git hook all fail closed: if something cannot be scanned, they say so and stop.
 
 ## Requirements
 
@@ -11,6 +11,7 @@ Nothing is sent anywhere. The model runs in a Podman container bound to `127.0.0
 - For the default torch backend: an NVIDIA GPU with roughly 3 GB free VRAM, plus the NVIDIA container toolkit / CDI. Startup refuses below that threshold.
 - For the ONNX backend: an NVIDIA GPU is optional. `auto` uses CUDA when the device/toolkit is present and otherwise falls back to CPU; `cpu` forces CPU-only operation.
 - For the GLiNER2 backend: an NVIDIA GPU is optional. `auto` uses CUDA when available and otherwise runs on CPU.
+- For the PPLX backend: an NVIDIA GPU is optional. `auto` uses CUDA when available and otherwise runs on CPU.
 
 The default container loads the torch checkpoint in its native bfloat16, ~2.8 GB. Left alone, transformers upcasts to fp32 and doubles that, which will not share a 10 GB card with a game. ONNX defaults to the 1.5 GB int8 export: it matched fp16 ONNX on the synthetic comparison corpus and is safe on both CUDA and CPU. The smaller q4f16 export changed findings on CPU and returned incomplete findings through CUDA on the tested RTX 3080, so CUDA refuses q4 exports.
 
@@ -45,6 +46,12 @@ Multilingual GLiNER2 with CUDA preferred and CPU fallback:
 PRIVACY_FILTER_BACKEND=gliner2 ./privacy-filter-service restart
 ```
 
+PPLX with CUDA preferred and CPU fallback:
+
+```bash
+PRIVACY_FILTER_BACKEND=pplx ./privacy-filter-service restart
+```
+
 Use `restart`, not `ensure`, when changing the backend of an already healthy service: `ensure` deliberately reuses anything healthy rather than replacing an in-flight scanner.
 
 `check` exits `1` when it finds something, `0` when it does not. A cold torch start is about 6-10 seconds. There is no keep-warm mode by default: pinning 2.8 GB of VRAM to save six seconds is a bad trade.
@@ -56,6 +63,7 @@ Use `restart`, not `ensure`, when changing the backend of an already healthy ser
 | torch | `PRIVACY_FILTER_BACKEND=torch` (default) | NVIDIA CUDA | bf16 checkpoint, ~2.8 GB | 6.28 GB |
 | ONNX | `PRIVACY_FILTER_BACKEND=onnx` | CUDA preferred, CPU fallback | `onnx/model_quantized.onnx`, int8, ~1.5 GB | 1.51 GB |
 | GLiNER2 | `PRIVACY_FILTER_BACKEND=gliner2` | CUDA preferred, CPU fallback | `fastino/gliner2-privacy-filter-PII-multi`, fp16 on CUDA | 6.29 GB |
+| PPLX | `PRIVACY_FILTER_BACKEND=pplx` | CUDA preferred, CPU fallback | `perplexity-ai/pplx-pii-masking`, bf16, ~1.2 GB | 6.28 GB |
 
 `PRIVACY_FILTER_ONNX_PROVIDER` accepts `auto` (default), `cuda` or `cpu`. `cuda` refuses to start when CUDAExecutionProvider cannot load; it never falls back silently. `auto` maps an NVIDIA device when available and otherwise starts with CPUExecutionProvider.
 
@@ -66,6 +74,10 @@ Choose another published export with `PRIVACY_FILTER_ONNX_FILE`, for example `on
 `PRIVACY_FILTER_GLINER2_DEVICE` accepts `auto` (default), `cuda` or `cpu`; `PRIVACY_FILTER_GLINER2_THRESHOLD` defaults to `0.5`. The model emits 42 fine-grained labels, which the adapter maps into the service's stable eight-label vocabulary so hook allowlists and redaction markers do not change with the backend. It uses real half-open character spans returned by GLiNER2 and refuses missing, inconsistent or duplicate offsets rather than recreating positions with `text.find`.
 
 GLiNER2's encoder accepts 512 total tokens. Its 42-label schema occupies 186 encoded tokens on the pinned runtime, so the service reserves those tokens plus its safety margin and reports a 310-token text budget. Setting `PRIVACY_FILTER_MAX_TOKENS` above the model limit is still a startup error.
+
+`PRIVACY_FILTER_PPLX_DEVICE` accepts `auto` (default), `cuda` or `cpu`. PPLX emits the service's eight labels plus `other_pii`; the adapter maps that catch-all to `secret` so the public label vocabulary, hook allowlists and redaction markers stay stable. The model declares a 4096-token inference limit even though its tokenizer advertises 131072. The service uses the model limit and reports a 4080-token text budget after its safety margin.
+
+The PPLX checkpoint requires custom Python, but the service does not enable Hugging Face `trust_remote_code`. `scripts/pplx_model.py` is the exact MIT-licensed implementation from pinned revision `d8bb208c4fd23070493c42b39fb3454e746c7607` (SHA-256 `c43724b9ac105a9b74d44aea7565e4c43ddc9d203f519324baa342be01269869`). Startup downloads only the pinned configuration, tokenizer data and weights; changing the model name is refused because other weights or code have not been audited.
 
 ### Benchmarks
 
@@ -87,6 +99,7 @@ RTX 3080 / i5-12600KF; 47 synthetic texts (22 hard, 13 clean), 70 annotated span
 | `gliner2-cuda-fp16` | 0.82 | 0.84 | 87% | 93% | 0.87 | 8 |
 | `onnx-cuda-fp16` | 0.71 | 0.78 | 83% | 86% | 0.62 | 4 |
 | `onnx-cpu-fp16` | 0.71 | 0.78 | 83% | 86% | 0.63 | 4 |
+| `pplx-cuda-bf16` | 0.67 | 0.74 | 81% | 86% | 0.85 | 2 |
 | `onnx-cuda-int8` | 0.70 | 0.77 | 83% | 86% | 0.61 | 4 |
 | `onnx-cpu-int8` | 0.71 | 0.78 | 83% | 86% | 0.62 | 4 |
 | `torch-cuda-bf16` | 0.70 | 0.78 | 83% | 86% | 0.60 | 3 |
@@ -96,6 +109,7 @@ RTX 3080 / i5-12600KF; 47 synthetic texts (22 hard, 13 clean), 70 annotated span
 | Variant | Corpus scan | GPU resident |
 | --- | ---: | ---: |
 | `gliner2-cuda-fp16` | 0.55s (11.7 ms/text) | 1,884 MiB |
+| `pplx-cuda-bf16` | 0.96s (20.4 ms/text) | 1,432 MiB |
 | `onnx-cuda-fp16` | 0.18s (3.8 ms/text) | 4,348 MiB |
 | `onnx-cuda-int8` | 7.72s (164 ms/text) | 504 MiB |
 | `torch-cuda-bf16` | 5.02s (107 ms/text) | 2,968 MiB |
@@ -107,6 +121,8 @@ RTX 3080 / i5-12600KF; 47 synthetic texts (22 hard, 13 clean), 70 annotated span
 The default model's scores stay close, but its exports do not return identical findings: int8 differed from CPU fp16 on 4/47 texts, q4f16 on 7/47, native torch on 5/47, and CUDA fp16 on only 1/47. q4f16 also added two false person findings to a clean issue description. The hard tier separates from the full corpus (`0.60–0.63` versus `0.70–0.71` strict F1).
 
 GLiNER2 is materially stronger on this corpus: 0.82 strict F1, 87% direct-identifier entity recall, 93% quasi-identifier entity recall and 0.87 hard-tier F1. Its normalized findings differed from the CPU fp16 baseline on 27/47 texts. The trade-off is more noise: eight false findings across three of 13 clean records, versus three to five for the default-model variants. It also missed both annotated private URLs. This makes it a useful multilingual alternative, not evidence to change the default.
+
+PPLX is lighter and quieter, not more complete: it used 1.43 GiB, scanned the corpus in 0.96 seconds and produced two clean-record false findings, but reached only 0.67 strict F1 and 81% direct-identifier entity recall. Its hard-tier F1 was 0.85, and its normalized findings differed from CPU fp16 on 26/47 texts. That profile makes it a useful lower-memory alternative, not a safer default.
 
 The runtime trade-off is large. GLiNER2 scanned the short-text corpus in 0.55 seconds while holding 1.88 GiB, between CUDA fp16's 0.18 seconds / 4.35 GiB and CUDA int8's 7.72 seconds / 504 MiB. CPU fp16 is about 2.4 times faster than CPU int8 on this machine. The ONNX int8 default is therefore the low-VRAM choice, not the fastest one.
 
@@ -163,7 +179,7 @@ Entries are keyed on a digest of the content. A line-pinned entry would keep sup
 
 ## Security model
 
-- No network egress. The model is local; text is never sent to an API. The service binds `127.0.0.1` only.
+- No scanned-text network egress. Inference is local and text is never sent to an API; the service binds `127.0.0.1` only. On first use, a backend may download its pinned model assets into the local cache.
 - No authentication. Any local process can POST to `127.0.0.1:8757`, which is the same trust boundary as your own files. A web page cannot reach it: there are no CORS headers, cross-origin preflight is rejected, and non-JSON content types are refused. A hostile local process could submit text and read findings.
 - The container runs with SELinux labelling disabled (`--security-opt=label=disable`) so the shared model cache is reachable and a CUDA-selected backend can reach GPU device nodes. That weakens container confinement on the host; if it is unacceptable in your environment, work out a labelled volume/CDI setup instead.
 - Findings omit matched text by default in JSON, hook output, logs and errors. Only `--include-text` reveals it.
@@ -186,6 +202,8 @@ The suite runs on a plain interpreter with no GPU, torch, ONNX Runtime or FastAP
 | `scripts/token_classification.py` | Transformers-compatible BIO grouping (pure) |
 | `scripts/onnx_backend.py` | Raw ONNX Runtime classifier and fast-tokenizer adapter |
 | `scripts/gliner2_backend.py` | GLiNER2 adapter, label mapping and offset validation |
+| `scripts/pplx_model.py` | Audited PPLX model implementation vendored from a pinned revision |
+| `scripts/pplx_backend.py` | PPLX loader, stable label mapping and offset validation |
 | `scripts/privacy_filter_service.py` | FastAPI service; runs inside the container |
 | `scripts/privacy_filter_client.py` | CLI |
 | `scripts/service_control.py` | Container lifecycle, locking, leases |

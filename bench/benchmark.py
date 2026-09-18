@@ -46,6 +46,7 @@ CONTAINER = os.environ.get("PRIVACY_FILTER_CONTAINER", "privacy-filter-local")
 DEFAULT_MODEL = "openai/privacy-filter"
 NEMOTRON = "OpenMed/privacy-filter-nemotron"
 GLINER2 = "fastino/gliner2-privacy-filter-PII-multi"
+PPLX = "perplexity-ai/pplx-pii-masking"
 
 # The default and Nemotron models use 4096-token benchmark windows. GLiNER2's
 # mDeBERTa encoder accepts 512 total tokens, including its 42-label schema, so
@@ -132,6 +133,15 @@ VARIANTS = (
         },
         "42 canonicalized entity types, multilingual",
         max_tokens=None,
+    ),
+    Variant(
+        "pplx-cuda-bf16",
+        {
+            "PRIVACY_FILTER_BACKEND": "pplx",
+            "PRIVACY_FILTER_PPLX_DEVICE": "cuda",
+            "PRIVACY_FILTER_MODEL": PPLX,
+        },
+        "audited pinned custom model code, nine source labels canonicalized to eight",
     ),
 )
 
