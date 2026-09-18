@@ -242,7 +242,7 @@ def state() -> str:
         return STATE_DOWN
     if not body.get("ok"):
         return STATE_NOT_READY
-    if not body.get("cuda_available"):
+    if body.get("backend", "torch") == "torch" and not body.get("cuda_available"):
         return STATE_NO_GPU
     return STATE_HEALTHY
 

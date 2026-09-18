@@ -1,0 +1,9 @@
+numpy==2.4.6
+onnxruntime-gpu==1.30.0
+nvidia-cuda-runtime==13.4.92
+nvidia-cublas==13.8.0.4
+nvidia-curand==10.4.4.72
+tokenizers==0.23.2
+huggingface-hub==1.32.0
+fastapi==0.141.1
+uvicorn[standard]==0.53.0

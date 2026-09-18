@@ -97,6 +97,8 @@ class FakeTokenizer:
 
 
 class FakeClassifier:
+    provider = "CPUExecutionProvider"
+
     def __init__(self, behaviour=None):
         self.tokenizer = FakeTokenizer()
         self.model = types.SimpleNamespace(
@@ -117,10 +119,12 @@ class ServiceTestCase(unittest.TestCase):
         service.state.classifier = None
         service.state.scanner = None
         service.state.gpu_name = ""
+        service.state.provider_name = ""
         service.torch.cuda.is_available = lambda: True
 
     def install(self, behaviour=None, **policy_kwargs):
         service.state.classifier = FakeClassifier(behaviour)
+        service.state.provider_name = "CUDA"
         service.state.gpu_name = "FakeGPU"
         policy = BudgetPolicy(
             **{"max_tokens": 20, "min_tokens": 5, "overlap_tokens": 4, **policy_kwargs}
@@ -149,6 +153,10 @@ class ServiceTestCase(unittest.TestCase):
         """Stand in for the operator having set PRIVACY_FILTER_CONTEXT_LIMIT."""
         self.addCleanup(setattr, service, "CONTEXT_LIMIT", service.CONTEXT_LIMIT)
         service.CONTEXT_LIMIT = value
+
+    def configure_backend(self, value):
+        self.addCleanup(setattr, service, "BACKEND", service.BACKEND)
+        service.BACKEND = value
 
 
 class ScanErrorTest(ServiceTestCase):
@@ -184,7 +192,8 @@ class ScanErrorTest(ServiceTestCase):
     def test_unloaded_service_is_a_distinct_503(self):
         with self.assertRaises(FakeHTTPException) as ctx:
             service.scan("hello")
-        self.assertEqual(ctx.exception.detail["error"], "no_gpu")
+        self.assertEqual(ctx.exception.detail["error"], "backend_unavailable")
+        self.assertIn("nothing was scanned", ctx.exception.detail["message"])
 
     def test_a_window_that_fits_after_shrinking_succeeds(self):
         def oom_above_eight(chunk):
@@ -201,6 +210,12 @@ class ScanErrorTest(ServiceTestCase):
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].text, "NAME1")
         self.assertEqual(findings[0].start, text.index("NAME1"))
+
+    def test_onnx_scans_without_cuda(self):
+        self.configure_backend("onnx")
+        self.install(lambda chunk: [])
+        service.torch.cuda.is_available = lambda: False
+        self.assertEqual(service.scan("hello"), [])
 
 
 class EndpointTest(ServiceTestCase):
@@ -245,11 +260,24 @@ class HealthTest(ServiceTestCase):
         self.assertTrue(health["ok"])
         self.assertTrue(health["cuda_available"])
         self.assertEqual(health["max_tokens"], 20)
+        self.assertEqual(health["backend"], "torch")
+        self.assertEqual(health["provider"], "CUDA")
+        self.assertIsNone(health["model_file"])
         self.assertEqual(health["context_limit"], 131072)
         self.assertEqual(health["min_tokens"], 5)
         self.assertEqual(health["overlap_tokens"], 4)
         self.assertEqual(health["token_budgets"], [20, 10, 5])
         self.assertTrue(health["inference_serialized"])
+
+    def test_onnx_cuda_provider_reports_cuda_available(self):
+        self.configure_backend("onnx")
+        self.install()
+        service.state.provider_name = "CUDAExecutionProvider"
+        health = service.health()
+        self.assertEqual(health["backend"], "onnx")
+        self.assertEqual(health["provider"], "CUDAExecutionProvider")
+        self.assertTrue(health["cuda_available"])
+        self.assertEqual(health["model_file"], service.ONNX_FILE)
 
     def test_health_before_load_reports_not_ok(self):
         health = service.health()
@@ -319,6 +347,18 @@ class BudgetWiringTest(ServiceTestCase):
         self.stub_pipeline(FakeClassifier())
         service.load_classifier()
         self.assertEqual(service.state.scanner.policy.max_tokens, service.MAX_TOKENS)
+
+    def test_onnx_loads_without_calling_cuda(self):
+        self.configure_backend("onnx")
+        classifier = FakeClassifier()
+        original = service.load_onnx_classifier
+        service.load_onnx_classifier = lambda: classifier
+        self.addCleanup(setattr, service, "load_onnx_classifier", original)
+        service.torch.cuda.is_available = lambda: False
+        service.load_classifier()
+        self.assertIs(service.state.classifier, classifier)
+        self.assertEqual(service.state.provider_name, "CPUExecutionProvider")
+        self.assertEqual(service.oom_error_types(), (MemoryError,))
 
     def test_slow_tokenizer_falls_back_to_character_offsets(self):
         service.state.classifier = FakeClassifier()

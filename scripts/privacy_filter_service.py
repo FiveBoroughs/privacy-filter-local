@@ -6,10 +6,23 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from typing import Any
 
-import torch
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from transformers import pipeline
+
+BACKEND = os.environ.get("PRIVACY_FILTER_BACKEND", "torch").lower()
+SUPPORTED_BACKENDS = {"torch", "onnx"}
+if BACKEND not in SUPPORTED_BACKENDS:
+    choices = ", ".join(sorted(SUPPORTED_BACKENDS))
+    raise RuntimeError(f"PRIVACY_FILTER_BACKEND must be one of: {choices}")
+
+# CPU ONNX images deliberately do not contain torch or transformers. Importing
+# them only for the default backend keeps that image small and GPU-independent.
+if BACKEND == "torch":
+    import torch
+    from transformers import pipeline
+else:
+    torch = None
+    pipeline = None
 
 from adaptive_scan import (
     AdaptiveScanner,
@@ -29,6 +42,9 @@ from text_chunking import Span, plan_chunks
 
 
 DEFAULT_MODEL = "openai/privacy-filter"
+DEFAULT_ONNX_FILE = "onnx/model_quantized.onnx"
+ONNX_FILE = os.environ.get("PRIVACY_FILTER_ONNX_FILE", DEFAULT_ONNX_FILE)
+ONNX_PROVIDER = os.environ.get("PRIVACY_FILTER_ONNX_PROVIDER", "auto").lower()
 
 # Reserve a little headroom below the model's context limit for the special
 # tokens the pipeline adds, plus slack for any tokenization drift between our
@@ -49,11 +65,11 @@ CONTEXT_LIMIT = os.environ.get("PRIVACY_FILTER_CONTEXT_LIMIT") or None
 # operator set above what the model accepts is refused at startup instead.
 MAX_TOKENS_CONFIGURED = bool(os.environ.get("PRIVACY_FILTER_MAX_TOKENS"))
 MAX_TOKENS = int(os.environ.get("PRIVACY_FILTER_MAX_TOKENS") or 4096)
-# Floor of the retry ladder. Below this the per-window overhead dominates and a
-# GPU that cannot fit 256 tokens cannot usefully run the model at all, so this
-# is where the scan gives up and fails closed instead of shrinking forever.
+# Floor of the retry ladder. Below this the per-window overhead dominates. A
+# backend that cannot fit 256 tokens cannot usefully run the model at all, so
+# this is where the scan gives up and fails closed instead of shrinking forever.
 MIN_TOKENS = int(os.environ.get("PRIVACY_FILTER_MIN_TOKENS", "256"))
-# Halving is aggressive enough to escape a transient VRAM squeeze in two or
+# Halving is aggressive enough to escape a transient memory squeeze in two or
 # three retries without re-running most of the input at a barely smaller size.
 SHRINK_FACTOR = float(os.environ.get("PRIVACY_FILTER_TOKEN_SHRINK_FACTOR", "0.5"))
 # Tokens each window re-reads from its predecessor. 64 subword tokens is far
@@ -73,6 +89,7 @@ class FilterState:
     scanner: AdaptiveScanner | None = None
     model_name: str = os.environ.get("PRIVACY_FILTER_MODEL", DEFAULT_MODEL)
     gpu_name: str = ""
+    provider_name: str = ""
     # In-flight scans, so a caller deciding whether to stop the container can
     # see that another one is still working.
     active_scans: int = 0
@@ -83,23 +100,35 @@ state = FilterState()
 
 
 def require_cuda() -> str:
-    if not torch.cuda.is_available():
+    if torch is None or not torch.cuda.is_available():
         raise RuntimeError("CUDA is required, but torch.cuda.is_available() is false")
     return torch.cuda.get_device_name(0)
 
 
+def load_onnx_classifier() -> Any:
+    from onnx_backend import OnnxClassifier
+
+    return OnnxClassifier(state.model_name, ONNX_FILE, provider=ONNX_PROVIDER)
+
+
 def load_classifier() -> None:
-    state.gpu_name = require_cuda()
-    state.classifier = pipeline(
-        task="token-classification",
-        model=state.model_name,
-        aggregation_strategy="simple",
-        device=0,
-        # Load in the checkpoint's native bfloat16 (~2.8GB) instead of letting
-        # transformers upcast to fp32 (~5.6GB). Halving the resident footprint is
-        # what lets the MoE share the GPU with a game without OOM-ing.
-        model_kwargs={"dtype": "auto"},
-    )
+    if BACKEND == "torch":
+        state.gpu_name = require_cuda()
+        state.provider_name = "CUDA"
+        state.classifier = pipeline(
+            task="token-classification",
+            model=state.model_name,
+            aggregation_strategy="simple",
+            device=0,
+            # Load in the checkpoint's native bfloat16 (~2.8GB) instead of letting
+            # transformers upcast to fp32 (~5.6GB). Halving the resident footprint is
+            # what lets the MoE share the GPU with a game without OOM-ing.
+            model_kwargs={"dtype": "auto"},
+        )
+    else:
+        state.gpu_name = ""
+        state.classifier = load_onnx_classifier()
+        state.provider_name = state.classifier.provider
     try:
         state.scanner = build_scanner()
     except ContextLimitError as exc:
@@ -205,7 +234,13 @@ def classify_window(chunk: str) -> list[dict[str, Any]]:
 
 
 def oom_error_types() -> tuple[type[BaseException], ...]:
-    """CUDA out-of-memory exception types this torch build raises."""
+    """Memory errors worth retrying at a smaller window."""
+    if BACKEND == "onnx":
+        # ORT does not expose a distinct CPU OOM exception. A broad ORT error
+        # can mean an invalid graph or input, and retrying that as if it were
+        # memory pressure would hide the real failure. Native MemoryError is the
+        # only unambiguous case; anything else propagates and callers fail closed.
+        return (MemoryError,)
     types: list[type[BaseException]] = []
     for candidate in (
         getattr(torch.cuda, "OutOfMemoryError", None),
@@ -217,13 +252,18 @@ def oom_error_types() -> tuple[type[BaseException], ...]:
     return tuple(types) or (MemoryError,)
 
 
+def clear_memory() -> None:
+    if BACKEND == "torch":
+        torch.cuda.empty_cache()
+
+
 def build_scanner() -> AdaptiveScanner:
     return AdaptiveScanner(
         plan_windows=plan_windows,
         classify=classify_window,
         policy=budget_policy(),
         oom_errors=oom_error_types(),
-        on_oom=torch.cuda.empty_cache,
+        on_oom=clear_memory,
     )
 
 
@@ -256,11 +296,18 @@ def health() -> dict[str, Any]:
     """Non-sensitive diagnostics only: never input text, never finding text."""
     scanner = state.scanner
     policy = scanner.policy if scanner is not None else None
+    cuda_available = bool(
+        (torch is not None and torch.cuda.is_available())
+        or state.provider_name == "CUDAExecutionProvider"
+    )
     return {
         "ok": state.classifier is not None,
-        "cuda_available": torch.cuda.is_available(),
+        "backend": BACKEND,
+        "provider": state.provider_name or None,
+        "cuda_available": cuda_available,
         "gpu_name": state.gpu_name,
         "model": state.model_name,
+        "model_file": ONNX_FILE if BACKEND == "onnx" else None,
         "dtype": str(state.classifier.model.dtype) if state.classifier is not None else None,
         # The model's own maximum sequence length, so an operator can see what
         # max_tokens is being held below without reading the model's config.
@@ -281,28 +328,39 @@ def scan(text: str) -> list[Finding]:
     """Scan with adaptive retries, mapping each failure to a distinct error.
 
     Callers (the CLI, the pre-commit hook) fail closed, so the failure mode has
-    to be legible: "the GPU is busy, retry" is a different instruction to "this
-    service has no GPU". Neither ever includes scanned text.
+    to be legible. No error ever includes scanned text.
     """
     scanner = state.scanner
-    if scanner is None or not torch.cuda.is_available():
+    if scanner is None:
+        raise service_error(
+            503,
+            "backend_unavailable",
+            "Privacy Filter backend is not loaded; nothing was scanned.",
+        )
+    if BACKEND == "torch" and not torch.cuda.is_available():
         raise service_error(
             503,
             "no_gpu",
-            "Privacy Filter is not GPU-backed; nothing was scanned.",
+            "Privacy Filter torch backend has no CUDA device; nothing was scanned.",
         )
     with state.scan_counter:
         state.active_scans += 1
     try:
         return scanner.scan(text)
     except ScanBudgetExhausted as exc:
+        gpu_memory = BACKEND == "torch" or state.provider_name == "CUDAExecutionProvider"
+        resource = "GPU memory" if gpu_memory else "memory"
+        remedy = (
+            "Free VRAM (e.g. close a game), lower PRIVACY_FILTER_MAX_TOKENS, or retry."
+            if gpu_memory
+            else "Free memory, lower PRIVACY_FILTER_MAX_TOKENS, or retry."
+        )
         raise service_error(
             503,
             "budget_exhausted",
             (
-                f"Ran out of GPU memory even at the minimum window of {exc.budget} tokens; "
-                "nothing was scanned. Free VRAM (e.g. close a game), lower "
-                "PRIVACY_FILTER_MAX_TOKENS, or retry."
+                f"Ran out of {resource} even at the minimum window of {exc.budget} "
+                f"tokens; nothing was scanned. {remedy}"
             ),
         ) from exc
     finally:

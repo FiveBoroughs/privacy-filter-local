@@ -12,30 +12,32 @@ Use the local OpenAI Privacy Filter wrapper at:
 /path/to/privacy-filter-local/privacy-filter
 ```
 
-The wrapper calls a local-only service at `127.0.0.1:8757`. The service runs `openai/privacy-filter` in Podman with GPU required; startup fails if CUDA is unavailable. Do not paste raw sensitive text into remote tools, web search, hosted inference APIs, issue comments, PR comments, or model prompts before running this local filter.
+The wrapper calls a local-only service at `127.0.0.1:8757`. The default torch backend requires an NVIDIA GPU; `PRIVACY_FILTER_BACKEND=onnx` selects ONNX Runtime, preferring CUDA and falling back to CPU. `PRIVACY_FILTER_ONNX_PROVIDER=cuda` requires CUDA without fallback; `cpu` forces CPU. Do not paste raw sensitive text into remote tools, web search, hosted inference APIs, issue comments, PR comments, or model prompts before running this local filter.
 
-Submit whole files. The service splits large inputs into overlapping token windows itself, shrinks the window when the GPU is short of memory, and reports findings against the original offsets — never pre-chunk, truncate, or loop over slices of the input yourself.
+Submit whole files. The service splits large inputs into overlapping token windows itself and reports findings against the original offsets — never pre-chunk, truncate, or loop over slices of the input yourself. Torch CUDA and ONNX CUDA shrink a window on allocator OOM. ONNX CPU retries only native `MemoryError`; ambiguous runtime failures propagate and callers fail closed rather than being misreported as retryable OOM.
 
 ## Service lifecycle
 
 Use one command for the whole lifecycle. Do **not** run `start-service` and poll `health` by hand: `start-service` is the low-level primitive and its `podman run --replace` kills any scan already in flight.
 
 ```bash
-/path/to/privacy-filter-local/privacy-filter-service ensure   # start if needed, block until ready
+/path/to/privacy-filter-local/privacy-filter-service ensure   # default: torch/CUDA
+PRIVACY_FILTER_BACKEND=onnx /path/to/privacy-filter-local/privacy-filter-service ensure  # CUDA if present
+PRIVACY_FILTER_BACKEND=onnx PRIVACY_FILTER_ONNX_PROVIDER=cpu /path/to/privacy-filter-local/privacy-filter-service restart
 /path/to/privacy-filter-local/privacy-filter-service status   # report state, change nothing
-/path/to/privacy-filter-local/privacy-filter-service stop     # stop and free VRAM
+/path/to/privacy-filter-local/privacy-filter-service stop     # stop and release resources
 ```
 
-`ensure` is idempotent, takes a lock so concurrent callers cannot replace each other's container, and prints `started` or `reused` — run it before any scan and it costs ~50ms when the service is already up. A cold start takes about 6-10s, so there is no keep-warm mode; stop it when you are done and give the VRAM back.
+`ensure` is idempotent, takes a lock so concurrent callers cannot replace each other's container, and prints `started` or `reused` — run it before any scan and it costs ~50ms when the service is already up. Use `restart`, not `ensure`, when changing the backend of an already healthy service: reuse is deliberate. A cold torch start takes about 6-10s; stop it when you are done and give the VRAM back.
 
-`status` exit codes: `0` healthy, `1` down, `2` running but not ready, `3` running without a GPU.
+`status` exit codes: `0` healthy, `1` down, `2` running but not ready, `3` the torch backend is running without a GPU.
 
 ### Concurrency
 
 Commits and scans can overlap safely:
 
 - `ensure` serializes on a lock, so simultaneous callers never replace each other's container — the loser gets `reused`.
-- The service serializes GPU work per window, so two scans in flight at once both complete.
+- The service serializes inference per window, so two scans in flight at once both complete.
 - `stop` **refuses** while another caller holds a lease or a scan is running, printing `refused: ...` and exiting `6`. Pass `--force` only when you want the VRAM back regardless and accept killing that work.
 
 The pre-commit hook takes a *lease* for the duration of a commit and releases it afterwards, so the service is only torn down by the last caller out. You do not need leases for one-off scans — the running-scan guard already covers those.
@@ -88,15 +90,18 @@ By default JSON findings omit raw matched text. Add `--include-text` only when t
 | 6 | Other service error |
 | 7 | Scan did not finish before the timeout; nothing was scanned |
 
-Codes 2 to 7 all mean the content was **not** scanned. Treat them as "still unsafe to send anywhere", never as a pass. For code 5, free VRAM (a running game is the usual cause), lower `PRIVACY_FILTER_MAX_TOKENS`, or retry.
+Codes 2 to 7 all mean the content was **not** scanned. Treat them as "still unsafe to send anywhere", never as a pass. For code 5, free memory, lower `PRIVACY_FILTER_MAX_TOKENS`, or retry; on torch, a running game is the usual cause.
 
-## Large inputs and GPU memory
+## Large inputs and memory
 
-The service starts at `PRIVACY_FILTER_MAX_TOKENS` per window. When a window does not fit in VRAM it discards that window's results, frees the cache, and retries only that span at `PRIVACY_FILTER_TOKEN_SHRINK_FACTOR` of the budget, down to `PRIVACY_FILTER_MIN_TOKENS`. Windows that already succeeded are not rescanned; if the minimum still does not fit, the request fails closed with HTTP 503 and no partial findings.
+On a cold ONNX CUDA start, an unset `PRIVACY_FILTER_MAX_TOKENS` is selected from free VRAM: 4096 tokens at 6 GiB free, 2048 at 3 GiB, 1024 at 1.5 GiB, and 256 below that. An explicit maximum overrides this selection. During requests, torch CUDA and ONNX CUDA discard an OOM window's results, free the cache when the backend supports it, and retry only that span at `PRIVACY_FILTER_TOKEN_SHRINK_FACTOR` of the budget, down to `PRIVACY_FILTER_MIN_TOKENS`. Windows that already succeeded are not rescanned; if the minimum still does not fit, the request fails closed with HTTP 503 and no partial findings. ONNX CPU uses the same windows and overlap, but only a native `MemoryError` is unambiguously retryable; other ONNX Runtime errors propagate and fail closed.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `PRIVACY_FILTER_MAX_TOKENS` | 4096 | Starting window size, capped by the model's context limit |
+| `PRIVACY_FILTER_BACKEND` | `torch` | `torch` or `onnx` |
+| `PRIVACY_FILTER_ONNX_PROVIDER` | `auto` | `auto` prefers CUDA then CPU; `cuda` requires CUDA; `cpu` forces CPU |
+| `PRIVACY_FILTER_ONNX_FILE` | `onnx/model_quantized.onnx` | Export loaded by ONNX; q4 exports are refused on CUDA |
+| `PRIVACY_FILTER_MAX_TOKENS` | 4096 or ONNX CUDA auto-selection | Starting window size, capped by the model's context limit |
 | `PRIVACY_FILTER_MIN_TOKENS` | 256 | Smallest window tried before giving up |
 | `PRIVACY_FILTER_TOKEN_SHRINK_FACTOR` | 0.5 | Backoff applied per retry |
 | `PRIVACY_FILTER_CHUNK_OVERLAP_TOKENS` | 64 | Tokens each window re-reads, so PII cannot hide in a cut |
@@ -104,9 +109,9 @@ The service starts at `PRIVACY_FILTER_MAX_TOKENS` per window. When a window does
 | `PRIVACY_FILTER_HEALTH_TIMEOUT` | 30 | Client-side seconds to wait for `health` |
 | `PRIVACY_FILTER_CONTEXT_LIMIT` | from model config | The model's real maximum sequence length, for a model whose config does not declare one |
 
-A timeout (exit 7) is reported separately from an unreachable service (exit 3): a slow scan usually means the service is busy, not stopped, so restarting it is the wrong move. Very small window sizes make scans dramatically slower — one forward pass per window — so lower `PRIVACY_FILTER_MAX_TOKENS` only as far as the GPU actually needs.
+A timeout (exit 7) is reported separately from an unreachable service (exit 3): a slow scan usually means the service is busy, not stopped, so restarting it is the wrong move. Very small window sizes make scans dramatically slower — one forward pass per window — so lower `PRIVACY_FILTER_MAX_TOKENS` only as far as available memory actually needs.
 
-`privacy-filter health` reports these live, along with the retry ladder. GPU inference is serialized in-process, so two concurrent requests cannot allocate transient memory at the same time.
+`privacy-filter health` reports the backend, provider, model file, dtype, live budgets and retry ladder. Inference is serialized in-process, so two concurrent requests cannot allocate transient memory at the same time.
 
 Windows are never larger than the model's own maximum sequence length; `health` reports it as `context_limit`. A larger window would be truncated silently and findings past the cut would vanish from a scan that reported success, so the service refuses to start when `PRIVACY_FILTER_MAX_TOKENS` is set above it, or when the model declares no limit for `PRIVACY_FILTER_CONTEXT_LIMIT` to supply. Neither is a scan failure to work around: nothing has been scanned.
 

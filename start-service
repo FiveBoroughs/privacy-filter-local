@@ -5,25 +5,75 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-IMAGE="${PRIVACY_FILTER_IMAGE:-localhost/privacy-filter-local:gpu}"
+BACKEND="${PRIVACY_FILTER_BACKEND:-torch}"
+case "$BACKEND" in
+  torch|onnx) ;;
+  *)
+    echo "ERROR: PRIVACY_FILTER_BACKEND must be 'torch' or 'onnx', got '$BACKEND'." >&2
+    exit 1
+    ;;
+esac
+ONNX_PROVIDER="${PRIVACY_FILTER_ONNX_PROVIDER:-auto}"
+case "$ONNX_PROVIDER" in
+  auto|cpu|cuda) ;;
+  *)
+    echo "ERROR: PRIVACY_FILTER_ONNX_PROVIDER must be 'auto', 'cpu' or 'cuda', got '$ONNX_PROVIDER'." >&2
+    exit 1
+    ;;
+esac
+if [ "$BACKEND" = "onnx" ] \
+   && [ "$ONNX_PROVIDER" = "cuda" ] \
+   && ! command -v nvidia-smi >/dev/null 2>&1; then
+  echo "ERROR: PRIVACY_FILTER_ONNX_PROVIDER=cuda, but nvidia-smi is unavailable." >&2
+  exit 1
+fi
+DEFAULT_TAG="gpu"
+if [ "$BACKEND" = "onnx" ]; then
+  DEFAULT_TAG="onnx"
+fi
+IMAGE="${PRIVACY_FILTER_IMAGE:-localhost/privacy-filter-local:${DEFAULT_TAG}}"
 CONTAINER="${PRIVACY_FILTER_CONTAINER:-privacy-filter-local}"
 PORT="${PRIVACY_FILTER_PORT:-8757}"
-# The model needs ~2.8GB bf16 weights plus the CUDA context and transient
-# per-request memory. Refuse to start below this so a VRAM-starved GPU (e.g. a
-# running game) fails fast here instead of OOM-ing on the first commit. Tunable.
-MIN_FREE_VRAM_MIB="${PRIVACY_FILTER_MIN_FREE_VRAM_MIB:-3000}"
-
-# Preflight VRAM check. Skipped when our container is already running (its own
-# weights would otherwise count as "used" and falsely trip the gate on restart).
+# Probe once on a cold start. A running container owns VRAM that --replace will
+# release, so measuring while it exists would choose an artificially small
+# window. `privacy-filter-service restart` stops it before reaching this script.
+free_mib=""
 if command -v nvidia-smi >/dev/null 2>&1 \
    && ! podman ps --filter "name=^${CONTAINER}$" --format '{{.Names}}' | grep -q .; then
   free_mib=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1 | tr -dc '0-9')
-  if [ -n "$free_mib" ] && [ "$free_mib" -lt "$MIN_FREE_VRAM_MIB" ]; then
+fi
+
+# The torch model needs ~2.8GB bf16 weights plus the CUDA context and transient
+# per-request memory. Refuse to start below this so a VRAM-starved GPU fails
+# before loading the checkpoint.
+MIN_FREE_VRAM_MIB="${PRIVACY_FILTER_MIN_FREE_VRAM_MIB:-3000}"
+if [ "$BACKEND" = "torch" ] && [ -n "$free_mib" ]; then
+  if [ "$free_mib" -lt "$MIN_FREE_VRAM_MIB" ]; then
     echo "ERROR: only ${free_mib} MiB GPU memory free, need >= ${MIN_FREE_VRAM_MIB} MiB to start the Privacy Filter." >&2
     echo "Close VRAM-heavy apps (e.g. a game), or override with PRIVACY_FILTER_MIN_FREE_VRAM_MIB=<mib>." >&2
     exit 1
   fi
   echo "GPU memory free: ${free_mib} MiB (need >= ${MIN_FREE_VRAM_MIB})"
+fi
+
+# ONNX CUDA can start small. Pick the largest window whose measured peak leaves
+# roughly 0.75 GiB of headroom on the RTX 3080; per-request adaptive shrinking
+# remains the authority if availability changes after startup. An operator-set
+# maximum always wins.
+if [ "$BACKEND" = "onnx" ] \
+   && [ "$ONNX_PROVIDER" != "cpu" ] \
+   && [ -n "$free_mib" ] \
+   && [ -z "${PRIVACY_FILTER_MAX_TOKENS:-}" ]; then
+  if [ "$free_mib" -ge 6144 ]; then
+    PRIVACY_FILTER_MAX_TOKENS=4096
+  elif [ "$free_mib" -ge 3072 ]; then
+    PRIVACY_FILTER_MAX_TOKENS=2048
+  elif [ "$free_mib" -ge 1536 ]; then
+    PRIVACY_FILTER_MAX_TOKENS=1024
+  else
+    PRIVACY_FILTER_MAX_TOKENS=256
+  fi
+  echo "GPU memory free: ${free_mib} MiB; selecting ${PRIVACY_FILTER_MAX_TOKENS} tokens for ONNX"
 fi
 
 mkdir -p "$ROOT/cache"
@@ -34,22 +84,36 @@ mkdir -p "$ROOT/cache"
 env_args=()
 for name in PRIVACY_FILTER_MAX_TOKENS PRIVACY_FILTER_MIN_TOKENS \
             PRIVACY_FILTER_TOKEN_SHRINK_FACTOR PRIVACY_FILTER_CHUNK_OVERLAP_TOKENS \
-            PRIVACY_FILTER_CONTEXT_LIMIT PRIVACY_FILTER_MODEL; do
+            PRIVACY_FILTER_CONTEXT_LIMIT PRIVACY_FILTER_MODEL PRIVACY_FILTER_ONNX_FILE; do
   if [ -n "${!name:-}" ]; then
     env_args+=(--env "${name}=${!name}")
     echo "Passing ${name}=${!name} to the service"
   fi
 done
+env_args+=(--env "PRIVACY_FILTER_BACKEND=${BACKEND}")
+if [ "$BACKEND" = "onnx" ]; then
+  env_args+=(--env "PRIVACY_FILTER_ONNX_PROVIDER=${ONNX_PROVIDER}")
+fi
+
+device_args=()
+if [ "$BACKEND" = "torch" ]; then
+  device_args+=(--device nvidia.com/gpu=all)
+elif [ "$ONNX_PROVIDER" != "cpu" ] && command -v nvidia-smi >/dev/null 2>&1; then
+  # auto uses CUDA when a device is present and CPU elsewhere.
+  device_args+=(--device nvidia.com/gpu=all)
+fi
 
 # -q: the build is a cache hit on all but the first run, and the hook runs this
 # on every commit. Failures still print to stderr.
-podman build -q -t "$IMAGE" -f "$ROOT/Containerfile" "$ROOT" >/dev/null
+podman build -q \
+  --build-arg "PRIVACY_FILTER_BACKEND=${BACKEND}" \
+  -t "$IMAGE" -f "$ROOT/Containerfile" "$ROOT" >/dev/null
 podman run \
   --detach \
   --replace \
   --name "$CONTAINER" \
   --security-opt=label=disable \
-  --device nvidia.com/gpu=all \
+  "${device_args[@]}" \
   --publish "127.0.0.1:${PORT}:8757" \
   --volume "$ROOT/cache:/cache:rw" \
   "${env_args[@]}" \

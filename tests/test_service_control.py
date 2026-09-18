@@ -29,9 +29,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 import service_control as control  # noqa: E402
 
 
-HEALTHY = {"ok": True, "cuda_available": True, "gpu_name": "FakeGPU"}
-LOADING = {"ok": False, "cuda_available": True}
-NO_GPU = {"ok": True, "cuda_available": False}
+HEALTHY = {"ok": True, "backend": "torch", "cuda_available": True, "gpu_name": "FakeGPU"}
+LOADING = {"ok": False, "backend": "torch", "cuda_available": True}
+NO_GPU = {"ok": True, "backend": "torch", "cuda_available": False}
+ONNX = {"ok": True, "backend": "onnx", "cuda_available": False, "provider": "CPUExecutionProvider"}
 
 
 class StateTest(unittest.TestCase):
@@ -49,6 +50,10 @@ class StateTest(unittest.TestCase):
 
     def test_healthy(self):
         with mock.patch.object(control, "health", return_value=HEALTHY):
+            self.assertEqual(control.state(), control.STATE_HEALTHY)
+
+    def test_onnx_is_healthy_without_cuda(self):
+        with mock.patch.object(control, "health", return_value=ONNX):
             self.assertEqual(control.state(), control.STATE_HEALTHY)
 
     def test_status_command_maps_every_state_to_an_exit_code(self):
@@ -382,6 +387,93 @@ class LeaseTest(unittest.TestCase):
             self.assertEqual(control.active_scans(), 0)
         with mock.patch.object(control, "health", return_value={"active_scans": 3}):
             self.assertEqual(control.active_scans(), 3)
+
+
+class StartServiceBudgetTest(unittest.TestCase):
+    """The container receives a measured-safe ONNX window on a cold start."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.bin_dir = os.path.join(self.temp.name, "bin")
+        os.mkdir(self.bin_dir)
+        self.args_file = os.path.join(self.temp.name, "podman-args")
+        self.write_command(
+            "nvidia-smi",
+            '#!/bin/sh\necho "$FAKE_FREE_MIB"\n',
+        )
+        self.write_command(
+            "podman",
+            """#!/bin/sh
+case "$1" in
+  ps|build) exit 0 ;;
+  run)
+    shift
+    printf '%s\\n' "$@" > "$PODMAN_ARGS_FILE"
+    echo fake-container-id
+    ;;
+esac
+""",
+        )
+
+    def write_command(self, name, content):
+        path = os.path.join(self.bin_dir, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.chmod(path, 0o755)
+
+    def launch(self, free_mib, **settings):
+        env = os.environ.copy()
+        for name in (
+            "PRIVACY_FILTER_MAX_TOKENS",
+            "PRIVACY_FILTER_MIN_FREE_VRAM_MIB",
+            "PRIVACY_FILTER_ONNX_FILE",
+        ):
+            env.pop(name, None)
+        env.update(
+            {
+                "PATH": self.bin_dir + os.pathsep + env["PATH"],
+                "FAKE_FREE_MIB": str(free_mib),
+                "PODMAN_ARGS_FILE": self.args_file,
+                "PRIVACY_FILTER_BACKEND": "onnx",
+                "PRIVACY_FILTER_ONNX_PROVIDER": "cuda",
+            }
+        )
+        env.update(settings)
+        result = subprocess.run(
+            [os.path.join(os.path.dirname(__file__), "..", "start-service")],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(self.args_file, encoding="utf-8") as handle:
+            return result.stdout, handle.read().splitlines()
+
+    def test_free_vram_selects_the_largest_measured_safe_window(self):
+        for free_mib, expected in (
+            (7000, 4096),
+            (4000, 2048),
+            (2000, 1024),
+            (1000, 256),
+        ):
+            with self.subTest(free_mib=free_mib):
+                output, arguments = self.launch(free_mib)
+                self.assertIn(f"PRIVACY_FILTER_MAX_TOKENS={expected}", arguments)
+                self.assertIn(f"selecting {expected} tokens", output)
+
+    def test_an_explicit_window_overrides_the_vram_selection(self):
+        _, arguments = self.launch(1000, PRIVACY_FILTER_MAX_TOKENS="2048")
+        self.assertIn("PRIVACY_FILTER_MAX_TOKENS=2048", arguments)
+
+    def test_forced_cpu_does_not_invent_a_gpu_budget(self):
+        _, arguments = self.launch(7000, PRIVACY_FILTER_ONNX_PROVIDER="cpu")
+        self.assertFalse(
+            any(argument.startswith("PRIVACY_FILTER_MAX_TOKENS=") for argument in arguments)
+        )
+        self.assertNotIn("nvidia.com/gpu=all", arguments)
 
 
 class HealthTest(unittest.TestCase):
