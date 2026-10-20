@@ -4,6 +4,7 @@ FROM docker.io/python:3.11-slim
 ARG PRIVACY_FILTER_BACKEND
 ENV HF_HOME=/cache/huggingface \
     TRANSFORMERS_CACHE=/cache/huggingface/transformers \
+    HF_HUB_DISABLE_SHARED_BLOBS=1 \
     PYTHONUNBUFFERED=1 \
     PRIVACY_FILTER_BACKEND=${PRIVACY_FILTER_BACKEND} \
     LD_LIBRARY_PATH=/usr/local/lib/python3.11/site-packages/nvidia/cu13/lib
